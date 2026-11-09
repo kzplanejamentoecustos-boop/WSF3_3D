@@ -2065,7 +2065,10 @@ function atualizarBussola() {
 }
 
 // ---------- loop ----------
+let tamFixo = null;   // [larg, alt] durante a gravação de vídeo: renderiza em resolução fixa, independente da janela
 function redimensionar() {
+  if (tamFixo) { renderer.setPixelRatio(1); renderer.setSize(tamFixo[0], tamFixo[1], false); camera.aspect = tamFixo[0] / tamFixo[1]; camera.updateProjectionMatrix(); return; }
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   const w = cenaEl.clientWidth, h = cenaEl.clientHeight; if (!w || !h) return;
   renderer.setSize(w, h); labelR.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
 }
@@ -2085,7 +2088,8 @@ renderer.setAnimationLoop(now => {
 const espera = ms => new Promise(r => setTimeout(r, ms));
 function desenharQuadro(g, W, H, subtitulo) {
   const k = H / 900;
-  g.drawImage(renderer.domElement, 0, 0, W, H);
+  { const src = renderer.domElement, sw = src.width, sh = src.height; let cw = sw, ch = sh; if (sw / sh > W / H) cw = sh * W / H; else ch = sw * H / W;
+    g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, W, H); }   // recorte central na proporção do vídeo
   g.fillStyle = 'rgba(30,58,95,.92)'; g.fillRect(0, 0, W, 86 * k);
   g.fillStyle = '#fff'; g.font = `700 ${30 * k}px Segoe UI, Arial`; g.textBaseline = 'middle'; g.textAlign = 'left';
   g.fillText('TECON Salvador · Expansão — Simulação 4D', 28 * k, 32 * k);
@@ -2103,36 +2107,87 @@ function desenharQuadro(g, W, H, subtitulo) {
   g.fillStyle = 'rgba(30,58,95,.25)'; g.fillRect(0, H - 8 * k, W, 8 * k); g.fillStyle = '#16a34a'; g.fillRect(0, H - 8 * k, W * f, 8 * k);
 }
 let gravando = false;
-async function gravarVideo(modo) {
+// ---- gravador MP4 padrão (H.264 + AAC, índice no início do arquivo) — aceito pelo PowerPoint, WhatsApp e players comuns ----
+// Quadros com carimbo de tempo fixo (30 qps): o vídeo não depende da velocidade do computador. Trilha de áudio AAC silenciosa.
+const MP4_MUXER = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/build/mp4-muxer.mjs';
+async function criarGravadorMP4(W, H, fps = 30) {
+  if (!window.VideoEncoder || !window.VideoFrame) throw new Error('Este navegador não grava MP4 H.264; use Chrome ou Edge atualizados');
+  const { Muxer, ArrayBufferTarget } = await import(MP4_MUXER);
+  let cfgV = null;
+  for (const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42e028']) {   // High, Main, Baseline — nível 4.0 (1080p)
+    const c = { codec, width: W, height: H, bitrate: 12e6, framerate: fps, avc: { format: 'avc' } };
+    try { if ((await VideoEncoder.isConfigSupported(c)).supported) { cfgV = c; break; } } catch (e) {}
+  }
+  if (!cfgV) throw new Error('Codificador H.264 indisponível neste navegador');
+  const SR = 48000, CH = 2, cfgA = { codec: 'mp4a.40.2', sampleRate: SR, numberOfChannels: CH, bitrate: 128000 };
+  let aacNativo = false; try { aacNativo = !!window.AudioEncoder && (await AudioEncoder.isConfigSupported(cfgA)).supported; } catch (e) {}
+  const target = new ArrayBufferTarget();
+  const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H, frameRate: fps }, audio: { codec: 'aac', numberOfChannels: CH, sampleRate: SR }, fastStart: 'in-memory', firstTimestampBehavior: 'offset' });
+  let erro = null, n = 0; const dur = 1e6 / fps;
+  const ve = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => erro = e });
+  ve.configure(cfgV);
+  return {
+    codec: cfgV.codec, aacNativo,
+    async quadro(canvas, vezes = 1) {   // acrescenta o conteúdo atual do canvas, repetido "vezes" quadros
+      for (let i = 0; i < vezes; i++) {
+        if (erro) throw erro;
+        const f = new VideoFrame(canvas, { timestamp: Math.round(n * dur), duration: Math.round(dur) });
+        ve.encode(f, { keyFrame: n % (fps * 2) === 0 }); f.close(); n++;
+        while (ve.encodeQueueSize > 6) await espera(4);
+      }
+    },
+    async fechar() {
+      await ve.flush(); ve.close(); if (erro) throw erro;
+      const total = Math.round(n * dur * SR / 1e6);   // amostras de áudio = duração do vídeo
+      if (aacNativo) {
+        const ae = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: e => erro = e });
+        ae.configure(cfgA);
+        for (let t = 0; t < total; t += 4800) {
+          const k = Math.min(4800, total - t), ad = new AudioData({ format: 'f32-planar', sampleRate: SR, numberOfFrames: k, numberOfChannels: CH, timestamp: Math.round(t * 1e6 / SR), data: new Float32Array(k * CH) });
+          ae.encode(ad); ad.close();
+        }
+        await ae.flush(); ae.close(); if (erro) throw erro;
+      } else {   // quadro AAC-LC estéreo silencioso (1024 amostras) + AudioSpecificConfig 48 kHz / 2 canais
+        const SIL = new Uint8Array([0x21, 0x00, 0x49, 0x90, 0x02, 0x19, 0x00, 0x23, 0x80]), dq = 1024 * 1e6 / SR;
+        const meta = { decoderConfig: { codec: 'mp4a.40.2', numberOfChannels: CH, sampleRate: SR, description: new Uint8Array([0x11, 0x90]) } };
+        for (let i = 0; i * 1024 < total; i++) muxer.addAudioChunkRaw(SIL, 'key', Math.round(i * dq), Math.round(dq), i ? undefined : meta);
+      }
+      muxer.finalize();
+      return new Blob([target.buffer], { type: 'video/mp4' });
+    },
+    get segundos() { return n / fps; }
+  };
+}
+const capturar = desenho => new Promise(r => { posRender = () => { posRender = null; desenho(); r(); }; });   // roda logo após o próximo render
+function baixarVideo(blob, nome) {
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: nome });
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  toast(`Vídeo pronto (MP4 H.264 + AAC, ${(blob.size / 1e6).toFixed(1)} MB)`);
+}
+async function gravarVideo(modo, baixar = true) {
   if (gravando || !cronoMin) return;
-  if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) { toast('Este navegador não grava vídeo; use Chrome ou Edge'); return; }
-  gravando = true; const botoes = [$('#videoPlan'), $('#videoReal'), $('#cronoPlay')]; botoes.forEach(b => b.disabled = true);
+  const W = 1920, H = 1080, c2 = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = c2.getContext('2d');
+  let grav; try { grav = await criarGravadorMP4(W, H); } catch (e) { toast(e.message); return; }
+  gravando = true; const botoes = [$('#videoPlan'), $('#videoReal'), $('#videoComp'), $('#cronoPlay')]; botoes.forEach(b => b.disabled = true);
   if (cronoPlay) $('#cronoPlay').onclick();
   document.querySelectorAll('#cronoModo button').forEach(x => x.classList.toggle('on', x.dataset.c === modo)); cronoModo = modo;
-  $('#cronoSoExec').checked = true;
-  const W = renderer.domElement.width & ~1, H = renderer.domElement.height & ~1, c2 = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = c2.getContext('2d');
-  const tipo = ['video/mp4;codecs=avc1.42E01E', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
-  const rec = new MediaRecorder(c2.captureStream(30), { mimeType: tipo, videoBitsPerSecond: 10e6 }), partes = [];
-  rec.ondataavailable = e => { if (e.data.size) partes.push(e.data); };
+  $('#cronoSoExec').checked = true; tamFixo = [W, H]; redimensionar();
   const sub = modo === 'real' ? 'Realizado — datas reais do P6 + registros de campo' : 'Previsto — cronograma P6';
+  let blob = null;
   try {
-    atualizarDataCrono(new Date(cronoMin)); await espera(300);
-    posRender = () => desenharQuadro(g, W, H, sub); rec.start(500); await espera(1200);
+    atualizarDataCrono(new Date(cronoMin)); await capturar(() => desenharQuadro(g, W, H, sub)); await grav.quadro(c2, 36);
     const fimV = fimAnimacao();
     for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, fimV.getTime()))) {
-      atualizarDataCrono(d); await espera(200);
+      atualizarDataCrono(d); await capturar(() => desenharQuadro(g, W, H, sub)); await grav.quadro(c2, 9);   // 0,3 s por semana
       toast(`Gravando vídeo do ${modo === 'real' ? 'realizado' : 'previsto'}… ${Math.round(100 * (d - cronoMin) / (fimV - cronoMin))}%`);
       if (d >= fimV) break;
     }
-    await espera(2000);
-  } finally {
-    posRender = null; const fim = new Promise(r => rec.onstop = r); rec.stop(); await fim;
-    gravando = false; botoes.forEach(b => b.disabled = false);
-  }
-  const ext = tipo.startsWith('video/mp4') ? 'mp4' : 'webm', blob = new Blob(partes, { type: tipo });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `TECON-Salvador-simulacao-${modo === 'real' ? 'realizado' : 'previsto'}-${new Date().toISOString().slice(0, 10)}.${ext}` });
-  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  toast(`Vídeo pronto (${ext.toUpperCase()}, ${(blob.size / 1e6).toFixed(1)} MB)`);
+    await grav.quadro(c2, 60);
+    blob = await grav.fechar();
+  } catch (e) { console.error(e); toast('Falha ao gravar o vídeo: ' + e.message); }
+  finally { posRender = null; gravando = false; tamFixo = null; redimensionar(); botoes.forEach(b => b.disabled = false); }
+  if (blob && baixar) baixarVideo(blob, `TECON-Salvador-simulacao-${modo === 'real' ? 'realizado' : 'previsto'}-${new Date().toISOString().slice(0, 10)}.mp4`);
+  return blob;
 }
 // ---- vídeo comparativo: tela dividida, previsto (P6) à esquerda e realizado (P6 real + campo) à direita, na mesma data ----
 function molduraComparativo(g, W, H, HD, d, kp, kr, f) {
@@ -2158,55 +2213,45 @@ function molduraComparativo(g, W, H, HD, d, kp, kr, f) {
   g.fillStyle = 'rgba(30,58,95,.35)'; g.fillRect(0, H - 8, W, 8); g.fillStyle = '#16a34a'; g.fillRect(0, H - 8, W * f, 8);
 }
 let rotuloRealizado = () => 'REALIZADO — P6 real + registros de campo';
-async function gravarComparativo() {
+async function gravarComparativo(baixar = true) {
   if (gravando || !cronoMin) return;
-  if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) { toast('Este navegador não grava vídeo; use Chrome ou Edge'); return; }
+  const W = 1920, H = 1080, HD = 92, buf = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = buf.getContext('2d');
+  let grav; try { grav = await criarGravadorMP4(W, H); } catch (e) { toast(e.message); return; }
   gravando = true; const botoes = [$('#videoPlan'), $('#videoReal'), $('#videoComp'), $('#cronoPlay')]; botoes.forEach(b => b.disabled = true);
   if (cronoPlay) $('#cronoPlay').onclick();
   $('#cronoSoExec').checked = true;
-  // o quadro é montado num canvas auxiliar (buf) e só então copiado inteiro para o canvas gravado (c2), que é capturado a 30 qps
-  const W = 1920, H = 1080, HD = 92, c2 = Object.assign(document.createElement('canvas'), { width: W, height: H }), g2 = c2.getContext('2d');
-  const buf = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = buf.getContext('2d');
-  g2.fillStyle = '#142844'; g2.fillRect(0, 0, W, H);
-  const stream = c2.captureStream(30), publicar = () => g2.drawImage(buf, 0, 0);
-  const tipo = ['video/mp4;codecs=avc1.42E01E', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
-  const rec = new MediaRecorder(stream, { mimeType: tipo, videoBitsPerSecond: 12e6 }), partes = [];
-  rec.ondataavailable = e => { if (e.data.size) partes.push(e.data); };
   const setModo = m => { cronoModo = m; document.querySelectorAll('#cronoModo button').forEach(x => x.classList.toggle('on', x.dataset.c === m)); };
   const lerKpis = () => [...document.querySelectorAll('#cronoKpis .prog .l')].map(l => [...l.querySelectorAll('span')].map(s => s.textContent));
-  const metade = x => new Promise(r => { posRender = () => {   // copia o quadro recém-renderizado (recorte central) para uma metade
-    posRender = null; const src = renderer.domElement, sw = src.width, sh = src.height, ar = (W / 2) / (H - HD);
+  const metade = x => capturar(() => {   // copia o quadro recém-renderizado (recorte central) para uma metade
+    const src = renderer.domElement, sw = src.width, sh = src.height, ar = (W / 2) / (H - HD);
     let cw = sw, ch = sh; if (sw / sh > ar) cw = sh * ar; else ch = sw / ar;
-    g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, x, HD, W / 2, H - HD); r();
-  }; });
-  setModo('real'); const fim = fimAnimacao(); let ok = false;
+    g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, x, HD, W / 2, H - HD);
+  });
+  tamFixo = [W / 2, H - HD]; redimensionar();
+  setModo('real'); const fim = fimAnimacao(); let blob = null, primeiro = true;
   try {
-    rec.start(500);
     for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, fim.getTime()))) {
       semCampo = true; setModo('plan'); atualizarDataCrono(d); await metade(0); const kp = lerKpis();
       semCampo = false; setModo('real'); atualizarDataCrono(d); await metade(W / 2); const kr = lerKpis();
       molduraComparativo(g, W, H, HD, d, kp, kr, (d - cronoMin) / (fim - cronoMin));
-      publicar(); await espera(260);
+      await grav.quadro(buf, primeiro ? 36 : 12); primeiro = false;   // 0,4 s por semana
       toast(`Gravando previsto × realizado… ${Math.round(100 * (d - cronoMin) / (fim - cronoMin))}%`);
       if (d >= fim) break;
     }
-    for (let i = 0; i < 12; i++) { publicar(); await espera(200); }   // segura o último quadro
-    ok = true;
-  } finally {
-    const fimRec = new Promise(r => rec.onstop = r); rec.stop(); await fimRec;
-    semCampo = false; gravando = false; botoes.forEach(b => b.disabled = false); setModo('plan'); aplicarCores();
+    await grav.quadro(buf, 72);   // segura o último quadro
+    blob = await grav.fechar();
+  } catch (e) { console.error(e); toast('Falha ao gravar o vídeo: ' + e.message); }
+  finally {
+    posRender = null; semCampo = false; gravando = false; tamFixo = null; redimensionar(); botoes.forEach(b => b.disabled = false); setModo('plan'); aplicarCores();
   }
-  if (!ok) return;
-  const ext = tipo.startsWith('video/mp4') ? 'mp4' : 'webm', blob = new Blob(partes, { type: tipo });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `TECON-Salvador-previsto-x-realizado-${new Date().toISOString().slice(0, 10)}.${ext}` });
-  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  toast(`Vídeo pronto (${ext.toUpperCase()}, ${(blob.size / 1e6).toFixed(1)} MB)`);
+  if (blob && baixar) baixarVideo(blob, `TECON-Salvador-previsto-x-realizado-${new Date().toISOString().slice(0, 10)}.mp4`);
+  return blob;
 }
 $('#videoComp').onclick = () => gravarComparativo();
 $('#videoPlan').onclick = () => gravarVideo('plan');
 $('#videoReal').onclick = () => gravarVideo('real');
 
-window.TECON3D = { selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
+window.TECON3D = { gravarVideo, gravarComparativo, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
   rotuloRealizado: t => { rotuloRealizado = () => t; },
   vista: (p, t) => { anim = null; camera.position.set(...p); controls.target.set(...t); controls.update(); },
   quadro: (sub = '') => new Promise(r => { posRender = () => { posRender = null; const c = Object.assign(document.createElement('canvas'), { width: renderer.domElement.width, height: renderer.domElement.height }); if (sub) desenharQuadro(c.getContext('2d'), c.width, c.height, sub); else c.getContext('2d').drawImage(renderer.domElement, 0, 0); r(c.toDataURL('image/jpeg', .9)); }; }) };   // acesso por código (ex.: TECON3D.selecionar('EST 10-C'))
