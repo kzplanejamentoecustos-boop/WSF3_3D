@@ -160,8 +160,15 @@ textarea{min-height:64px;resize:vertical}
     </div>
     <div class="sec">
       <h3>Dados de controle</h3>
-      <p class="nota">Status e avanço são preenchidos por você no painel de cada elemento e ficam salvos neste navegador. Use exportar/importar para levar a outro computador.</p>
-      <div class="btns">
+      <p class="nota">Status e avanço são preenchidos por você no painel de cada elemento e ficam salvos neste navegador. Para compartilhar com o time, salve as atualizações na nuvem (Firebase, coleção "Avanços 3D").</p>
+      <label class="f" for="nuvemNome">Seu nome (registra quem salvou)</label>
+      <input id="nuvemNome" type="text" placeholder="Ex.: Vitor" maxlength="60">
+      <div class="btns" style="margin-top:8px">
+        <button class="btn pri" id="nuvemSalvar">Salvar atualizações</button>
+        <button class="btn" id="nuvemCarregar">Carregar atualizações</button>
+      </div>
+      <p class="nota" id="nuvemInfo"></p>
+      <div class="btns" style="margin-top:6px">
         <button class="btn" id="exportar">Exportar JSON</button>
         <button class="btn" id="importar">Importar JSON</button>
         <input type="file" id="arqImport" accept=".json,application/json" hidden>
@@ -1764,6 +1771,57 @@ $('#exportar').onclick = () => {
   const blob = new Blob([JSON.stringify({ formato: 'tecon-salvador-3d-controle', versao: 1, salvoEm: new Date().toISOString(), controle }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `controle-tecon-3d-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(a.href);
 };
+// ---------- nuvem: Firebase Firestore, coleção "Avanços 3D" ----------
+// Cada salvamento cria um documento novo (histórico). Antes de salvar, o app junta a última versão da nuvem com a deste navegador,
+// elemento por elemento, ficando com o registro mais recente ("atualizado"): ninguém apaga o que o colega salvou.
+const FIREBASE = {
+  apiKey: 'AIzaSyCk1hdv3h8A2gDOcaZDRuRtceDiG2bvXOc', authDomain: 'kz-planejamento-e-custos.firebaseapp.com', projectId: 'kz-planejamento-e-custos',
+  storageBucket: 'kz-planejamento-e-custos.firebasestorage.app', messagingSenderId: '755715307647', appId: '1:755715307647:web:eb1ad65dc71e2dd3bae74a',
+};
+const FB_SDK = 'https://www.gstatic.com/firebasejs/13.2.0', COLECAO = 'Avanços 3D', CHAVE_NOME = 'tecon-salvador-3d-nome';
+let nuvemFs = null;
+async function nuvem() {   // carrega o SDK só quando um dos botões é usado
+  if (nuvemFs) return nuvemFs;
+  const [{ initializeApp }, F] = await Promise.all([import(`${FB_SDK}/firebase-app.js`), import(`${FB_SDK}/firebase-firestore.js`)]);
+  return (nuvemFs = { db: F.getFirestore(initializeApp(FIREBASE, 'tecon3d')), F });
+}
+async function ultimaNuvem() {
+  const { db, F } = await nuvem();
+  const s = await F.getDocs(F.query(F.collection(db, COLECAO), F.orderBy('salvoEm', 'desc'), F.limit(1)));
+  return s.empty ? null : { id: s.docs[0].id, ...s.docs[0].data() };
+}
+const mesclarControle = (a, b) => { const r = { ...(a || {}) }; for (const [k, v] of Object.entries(b || {})) if (!r[k] || (v.atualizado || '') > (r[k].atualizado || '')) r[k] = v; return r; };
+const infoNuvem = d => d ? `Última versão na nuvem: ${new Date(d.salvoEmISO).toLocaleString('pt-BR')}${d.autor ? ` · ${esc(d.autor)}` : ''} · ${d.elementos} elementos` : 'Ainda não há versões na nuvem.';
+const erroNuvem = e => { console.error(e); toast(/permission/i.test(e?.code || e?.message || '') ? 'Sem permissão no Firestore: confira as regras do projeto' : 'Não foi possível acessar a nuvem (sem internet?)'); };
+function aplicarControleNovo() { salvarControle(); aplicarCores(); if (selecionado) selecionar(selecionado); }
+try { $('#nuvemNome').value = localStorage.getItem(CHAVE_NOME) || ''; } catch (e) { }
+$('#nuvemNome').addEventListener('change', () => { try { localStorage.setItem(CHAVE_NOME, $('#nuvemNome').value.trim()); } catch (e) { } });
+$('#nuvemSalvar').onclick = async () => {
+  const autor = $('#nuvemNome').value.trim();
+  if (!autor) { toast('Informe seu nome antes de salvar'); $('#nuvemNome').focus(); return; }
+  const b = $('#nuvemSalvar'); b.disabled = true; b.textContent = 'Salvando…';
+  try {
+    const { db, F } = await nuvem(), ult = await ultimaNuvem();
+    const junto = mesclarControle(ult ? JSON.parse(ult.dados || '{}') : {}, controle), dados = JSON.stringify(junto);
+    if (dados.length > 900000) { toast('Atualizações grandes demais para um salvamento (limite ~900 KB)'); return; }
+    const salvoEmISO = new Date().toISOString(), elementos = Object.keys(junto).length;
+    await F.addDoc(F.collection(db, COLECAO), { app: 'TECON Salvador 3D', autor, salvoEm: F.serverTimestamp(), salvoEmISO, elementos, dados });
+    controle = junto; aplicarControleNovo();
+    $('#nuvemInfo').innerHTML = infoNuvem({ salvoEmISO, autor, elementos });
+    toast(`Atualizações salvas na nuvem (${elementos} elementos)`);
+  } catch (e) { erroNuvem(e); } finally { b.disabled = false; b.textContent = 'Salvar atualizações'; }
+};
+$('#nuvemCarregar').onclick = async () => {
+  const b = $('#nuvemCarregar'); b.disabled = true; b.textContent = 'Carregando…';
+  try {
+    const ult = await ultimaNuvem();
+    $('#nuvemInfo').innerHTML = infoNuvem(ult);
+    if (!ult) { toast('Ainda não há atualizações na nuvem'); return; }
+    const antes = JSON.stringify(controle); controle = mesclarControle(controle, JSON.parse(ult.dados || '{}')); aplicarControleNovo();
+    toast(antes === JSON.stringify(controle) ? 'Já estava atualizado' : `Atualizações carregadas (${ult.elementos} elementos na nuvem)`);
+  } catch (e) { erroNuvem(e); } finally { b.disabled = false; b.textContent = 'Carregar atualizações'; }
+};
+
 $('#importar').onclick = () => $('#arqImport').click();
 $('#arqImport').onchange = async ev => {
   const f = ev.target.files[0]; if (!f) return;
