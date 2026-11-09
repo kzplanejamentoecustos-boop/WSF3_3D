@@ -247,6 +247,12 @@ let controle = {};
 try { controle = JSON.parse(localStorage.getItem(CHAVE) || '{}') || {}; } catch (e) { controle = {}; }
 function salvarControle() { try { localStorage.setItem(CHAVE, JSON.stringify(controle)); } catch (e) { toast('Não foi possível salvar neste navegador'); } }
 const statusDe = id => (controle[id] && controle[id].status) || 'nao';
+// registro de campo no cronograma: o status salvo vale a partir da "data da última verificação" (sem data: a partir de quando foi salvo)
+const dataCampo = c => c.data ? new Date(c.data + 'T00:00') : c.atualizado ? new Date(c.atualizado) : null;
+function campo(id, D) {
+  const c = controle[id]; if (!c || !c.status || c.status === 'nao') return null;
+  const d = dataCampo(c); return d && D >= d ? c.status : null;
+}
 
 // ---------- renderer / cena ----------
 const cenaEl = $('#cena');
@@ -1371,7 +1377,14 @@ function estadoCrono(id, D, modo) {
   for (const e of feitos) fazendo.delete(e);
   return { feitos, fazendo, total: todas.size };
 }
+function fracComCampo(id, f) {   // concluído em campo = 100%; em andamento/paralisado = avanço informado (ou 50%)
+  const fc = campo(id, cronoD); if (!fc) return f;
+  if (fc === 'ok') return 1;
+  const av = controle[id].avanco; return Math.max(f, av !== '' && av != null ? +av / 100 : .5);
+}
 function corCrono(o) {
+  const fc = campo(o.id, cronoD);   // registro de campo tem prioridade sobre o P6
+  if (fc) return fc === 'ok' ? COR_CRONO.feito : fc === 'par' ? COR_STATUS.par : COR_CRONO.parcial;
   const s = estadoCrono(o.id, cronoD, cronoModo); if (!s) return COR_CRONO.semDado;
   if (o.tipo === 'estaca') {
     if (s.fazendo.size) return COR_CRONO.fazendo;
@@ -1497,10 +1510,10 @@ function aplicarCores() {
   for (const o of objetos.values()) {
     if (o.tipo === 'quadra' || o.tipo === 'ponto') continue;
     if (o.tipo === 'aterro') {   // cresce conforme o avanço das atividades do P6
-      const f = modoCor !== 'crono' ? 0 : o.sub === 'fixo' ? 1 : fracCrono(o.id);
+      const f = modoCor !== 'crono' ? 0 : o.sub === 'fixo' ? 1 : fracComCampo(o.id, fracCrono(o.id));
       o.meshes.forEach(m => {
         const u = m.userData; let lf = u.r1 != null ? Math.max(0, Math.min(1, (f - u.r0) / Math.max(u.r1 - u.r0, 1e-6))) : f;   // célula da malha: frente avançando
-        if (u.cant && modoCor === 'crono') {   // sob o canteiro: só depois da desmobilização, de oeste para leste
+        if (u.cant && modoCor === 'crono' && !campo(o.id, cronoD)) {   // sob o canteiro: só depois da desmobilização, de oeste para leste (registro de campo prevalece)
           const fw = Math.max(0, Math.min(1, (cronoD - u.cant.ini) / (u.cant.fim - u.cant.ini)));
           lf = Math.max(0, Math.min(1, (fw - u.cant.r0) / Math.max(u.cant.r1 - u.cant.r0, 1e-6)));
         }
@@ -1535,7 +1548,7 @@ function aplicarCores() {
       continue;
     }
     if (o.tipo === 'edif' && porElem.has(o.id)) {   // prédios definitivos sobem conforme as atividades do P6
-      const f = modoCor === 'crono' ? (o.chao && cronoD < o.chao ? 0 : fracCrono(o.id)) : 1;   // sobre a laje: espera a laje ficar pronta
+      const f = modoCor === 'crono' ? (campo(o.id, cronoD) ? fracComCampo(o.id, fracCrono(o.id)) : o.chao && cronoD < o.chao ? 0 : fracCrono(o.id)) : 1;   // sobre a laje: espera a laje ficar pronta
       o.meshes.forEach(m => { m.scale.y = Math.max(f, .002); m.visible = f > .002; });
     }
     if (o.id === 'ATERRO') o.meshes.forEach(m => m.visible = !(modoCor === 'crono' && aterroIds.length));   // no cronograma o pátio aparece pelas células executadas
@@ -1560,7 +1573,7 @@ function aplicarVisCrono() {
   for (const o of objetos.values()) {
     if (o.tipo === 'aterro' || o.id === 'ATERRO' || o.tipo === 'canteiro') continue;   // controlados em aplicarCores
     let vis = true;
-    if (so) { const s = estadoCrono(o.id, cronoD, cronoModo); vis = s ? (s.feitos.size + s.fazendo.size) > 0 && !(o.chao && cronoD < o.chao) : fim; }
+    if (so) { const s = estadoCrono(o.id, cronoD, cronoModo); vis = campo(o.id, cronoD) ? true : s ? (s.feitos.size + s.fazendo.size) > 0 && !(o.chao && cronoD < o.chao) : fim; }
     (o.meshes || []).forEach(m => m.visible = vis);
   }
   aplicarCamadas();
@@ -1577,6 +1590,7 @@ function desenharLegenda() {
   if (modoCor === 'crono') L.innerHTML = '<div><b>Estacas: última etapa concluída</b></div>' + ORDEM_EST.map(e => it(ETAPAS[e][1], ETAPAS[e][0])).join('')
     + it(COR_CRONO.fazendo, 'Em execução na data') + it(COR_CRONO.nada, 'Não iniciado')
     + '<div style="margin-top:4px"><b>Superestrutura</b></div>' + it(COR_CRONO.feito, 'Concluída') + it(COR_CRONO.parcial, 'Em andamento') + it(COR_CRONO.semDado, 'Sem atividade no cronograma')
+    + '<div style="margin-top:4px"><b>Registro de campo</b> <span style="opacity:.7">(a partir da data informada)</span></div>' + it(COR_CRONO.feito, 'Concluído') + it(COR_CRONO.parcial, 'Em andamento') + it(COR_STATUS.par, 'Paralisado')
     + '<div style="margin-top:4px"><b>Pátio (aprox.)</b></div>' + it(COR_ATR.hid, 'Aterro (trecho em mar)') + it(COR_ATR.corte, 'Terraplanagem (trecho em terra)') + it(COR_ATR.conf, 'Conformação') + it(COR_ATR.cais, 'Faixa do cais') + it(COR_ATR.pav, 'Pavimento');
   else if (modoCor === 'status') L.innerHTML = Object.keys(COR_STATUS).map(s => it(COR_STATUS[s], NOME_STATUS[s])).join('');
   else if (modoCor === 'quadra') L.innerHTML = '<div><b>Cor por quadra</b></div>' + it(0xd2bf98, 'Pátio em aterro') + it(0xb9bec4, 'Laje estaqueada');
@@ -1667,6 +1681,7 @@ function selecionar(id, voar = false) {
       <div class="barra"><i style="width:${Math.min(100, Math.max(0, +c.avanco || 0))}%"></i></div>
       <label class="f">Data da última verificação</label>
       <input id="cData" type="date" value="${esc(c.data || '')}">
+      <p class="nota" style="margin:2px 0 0">Na animação do cronograma o elemento aparece com este status a partir desta data (sem data: a partir de quando foi salvo).</p>
       <label class="f">Observações</label>
       <textarea id="cObs" placeholder="Ex.: pendências, frente de serviço, responsável">${esc(c.obs || '')}</textarea>
       <div class="btns" style="margin-top:10px"><button class="btn pri" id="cSalvar">Salvar</button>${irmaos.length > 1 ? `<button class="btn" id="cSalvarLinha">Aplicar à linha ${esc(o.linha)} (${irmaos.length} ${esc((NOME_GRUPO[o.grupo] || 'elementos').toLowerCase())})</button>` : ''}</div>
