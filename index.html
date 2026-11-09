@@ -182,6 +182,11 @@ textarea{min-height:64px;resize:vertical}
         <button class="btn" id="cronoHoje">Data dos dados</button>
         <input type="file" id="cronoArq" accept=".xer" hidden>
       </div>
+      <label class="f">Baixar a simulação em vídeo (usa a vista atual da câmera)</label>
+      <div class="btns">
+        <button class="btn" id="videoPlan" title="Animação semana a semana pelo cronograma P6">🎬 Previsto</button>
+        <button class="btn" id="videoReal" title="Animação semana a semana pelo realizado: P6 real + registros de campo">🎬 Realizado</button>
+      </div>
     </div>
     <div class="sec">
       <h3>Camadas</h3>
@@ -2046,12 +2051,72 @@ new ResizeObserver(redimensionar).observe(cenaEl);
 redimensionar();
 aplicarCamadas();
 aplicarCores();
+let posRender = null;   // gravação de vídeo: copia o quadro logo após o render (o buffer do WebGL ainda está válido)
 renderer.setAnimationLoop(now => {
   if (anim) anim(now);
   controls.update(); atualizarBussola();
   renderer.render(scene, camera); labelR.render(scene, camera);
+  if (posRender) posRender();
 });
-window.TECON3D = { selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax] };   // acesso por código (ex.: TECON3D.selecionar('EST 10-C'))
+
+// ---------- vídeo da simulação (previsto / realizado) ----------
+const espera = ms => new Promise(r => setTimeout(r, ms));
+function desenharQuadro(g, W, H, subtitulo) {
+  const k = H / 900;
+  g.drawImage(renderer.domElement, 0, 0, W, H);
+  g.fillStyle = 'rgba(30,58,95,.92)'; g.fillRect(0, 0, W, 86 * k);
+  g.fillStyle = '#fff'; g.font = `700 ${30 * k}px Segoe UI, Arial`; g.textBaseline = 'middle'; g.textAlign = 'left';
+  g.fillText('TECON Salvador · Expansão — Simulação 4D', 28 * k, 32 * k);
+  g.font = `${20 * k}px Segoe UI, Arial`; g.globalAlpha = .85; g.fillText(subtitulo, 28 * k, 63 * k); g.globalAlpha = 1;
+  g.textAlign = 'right'; g.font = `700 ${38 * k}px Segoe UI, Arial`; g.fillText(cronoD.toLocaleDateString('pt-BR'), W - 28 * k, 44 * k);
+  // indicadores do painel do cronograma
+  const kp = [...document.querySelectorAll('#cronoKpis .prog .l')].map(l => [...l.querySelectorAll('span')].map(s => s.textContent)).slice(0, 5);
+  if (kp.length) {
+    const bw = 470 * k, lh = 34 * k, bh = (kp.length * lh) + 22 * k, bx = 24 * k, by = H - bh - 24 * k;
+    g.fillStyle = 'rgba(255,255,255,.93)'; g.beginPath(); g.roundRect(bx, by, bw, bh, 10 * k); g.fill();
+    g.font = `${17 * k}px Segoe UI, Arial`; kp.forEach(([a, b], i) => { const y = by + 11 * k + lh * i + lh / 2; g.fillStyle = '#334155'; g.textAlign = 'left'; g.fillText(a, bx + 14 * k, y); g.fillStyle = '#1e3a5f'; g.textAlign = 'right'; g.font = `700 ${17 * k}px Segoe UI, Arial`; g.fillText(b, bx + bw - 14 * k, y); g.font = `${17 * k}px Segoe UI, Arial`; });
+  }
+  // linha do tempo
+  const f = cronoMin ? Math.max(0, Math.min(1, (cronoD - cronoMin) / (cronoMax - cronoMin))) : 0;
+  g.fillStyle = 'rgba(30,58,95,.25)'; g.fillRect(0, H - 8 * k, W, 8 * k); g.fillStyle = '#16a34a'; g.fillRect(0, H - 8 * k, W * f, 8 * k);
+}
+let gravando = false;
+async function gravarVideo(modo) {
+  if (gravando || !cronoMin) return;
+  if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) { toast('Este navegador não grava vídeo; use Chrome ou Edge'); return; }
+  gravando = true; const botoes = [$('#videoPlan'), $('#videoReal'), $('#cronoPlay')]; botoes.forEach(b => b.disabled = true);
+  if (cronoPlay) $('#cronoPlay').onclick();
+  document.querySelectorAll('#cronoModo button').forEach(x => x.classList.toggle('on', x.dataset.c === modo)); cronoModo = modo;
+  $('#cronoSoExec').checked = true;
+  const W = renderer.domElement.width & ~1, H = renderer.domElement.height & ~1, c2 = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = c2.getContext('2d');
+  const tipo = ['video/mp4;codecs=avc1.42E01E', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const rec = new MediaRecorder(c2.captureStream(30), { mimeType: tipo, videoBitsPerSecond: 10e6 }), partes = [];
+  rec.ondataavailable = e => { if (e.data.size) partes.push(e.data); };
+  const sub = modo === 'real' ? 'Realizado — datas reais do P6 + registros de campo' : 'Previsto — cronograma P6';
+  try {
+    atualizarDataCrono(new Date(cronoMin)); await espera(300);
+    posRender = () => desenharQuadro(g, W, H, sub); rec.start(500); await espera(1200);
+    for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, cronoMax.getTime()))) {
+      atualizarDataCrono(d); await espera(200);
+      toast(`Gravando vídeo do ${modo === 'real' ? 'realizado' : 'previsto'}… ${Math.round(100 * (d - cronoMin) / (cronoMax - cronoMin))}%`);
+      if (d >= cronoMax) break;
+    }
+    await espera(2000);
+  } finally {
+    posRender = null; const fim = new Promise(r => rec.onstop = r); rec.stop(); await fim;
+    gravando = false; botoes.forEach(b => b.disabled = false);
+  }
+  const ext = tipo.startsWith('video/mp4') ? 'mp4' : 'webm', blob = new Blob(partes, { type: tipo });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `TECON-Salvador-simulacao-${modo === 'real' ? 'realizado' : 'previsto'}-${new Date().toISOString().slice(0, 10)}.${ext}` });
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  toast(`Vídeo pronto (${ext.toUpperCase()}, ${(blob.size / 1e6).toFixed(1)} MB)`);
+}
+$('#videoPlan').onclick = () => gravarVideo('plan');
+$('#videoReal').onclick = () => gravarVideo('real');
+
+window.TECON3D = { selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
+  vista: (p, t) => { anim = null; camera.position.set(...p); controls.target.set(...t); controls.update(); },
+  quadro: (sub = '') => new Promise(r => { posRender = () => { posRender = null; const c = Object.assign(document.createElement('canvas'), { width: renderer.domElement.width, height: renderer.domElement.height }); if (sub) desenharQuadro(c.getContext('2d'), c.width, c.height, sub); else c.getContext('2d').drawImage(renderer.domElement, 0, 0); r(c.toDataURL('image/jpeg', .9)); }; }) };   // acesso por código (ex.: TECON3D.selecionar('EST 10-C'))
 window.__ok3d = true;
 $('#carregando').remove();
 </script>
