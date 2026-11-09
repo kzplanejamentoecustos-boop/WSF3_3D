@@ -529,7 +529,7 @@ D.pontos.forEach(p => {
 const fmtEL = v => `EL ${v >= 0 ? '+' : '−'}${fmt(Math.abs(v), 2)} m`;
 const COR_F = { e1219: 0x6b7a8f, e1016: 0x0e7490, raiz: 0x9333ea, cap: 0xa8a29e, viga: 0x8fb0cf, apoio: 0x78716c, enc: 0x92400e, bloco: 0x92400e, viga1: 0x6f6259 };
 const GRUPOS_F = [['e1219', 'Estacas Ø1219'], ['e1016', 'Estacas Ø1016'], ['raiz', 'Estacas raiz Ø410'], ['bloco', 'Blocos B1–B6'], ['viga1', 'Viga do eixo −1'], ['capE', 'Capitéis 01A'], ['vtE', 'Vigas transversais 01A'], ['vuE', 'Vigas U 01A'], ['plE', 'Pré-lajes 01A'], ['cml1', 'Concreto in loco 1ª fase 01A'], ['cml2', 'Concreto in loco 2ª fase 01A'], ['estB', 'Estacas Seg. 02–04 (básico)'], ['cap', 'Capitéis (básico)'], ['viga', 'Vigas U/J (básico)'], ['plB', 'Pré-lajes (básico)'], ['apoio', 'Blocos de apoio (básico)'], ['encB', 'Blocos de encontro Seg. 04 (básico)']];
-const NOME_GRUPO = Object.fromEntries(GRUPOS_F);
+const NOME_GRUPO = { ...Object.fromEntries(GRUPOS_F), malha: 'Quadrados' };
 const linhaDe = eixo => String(eixo).split(/[-\s/]/)[0];
 const DOCS = F.documentos;
 function matF(c) { const m = new THREE.MeshStandardMaterial({ color: c, roughness: .7, metalness: .2 }); m.userData.base = c; return m; }
@@ -1062,6 +1062,16 @@ function clipRet(poly, x0, x1, y0, y1) {
   return out;
 }
 const xEixo = c => { const e = COLX.find(([k]) => k === c); return e ? e[1] : null; };
+let malhaExtra = [];   // linhas e rótulos da malha (refeitos quando o cronograma é reimportado)
+const MALHA = {   // malha de controle do aterro (quadrados eixo × letra)
+  passoY: 10,
+  letra: i => { const L = 'PQRSTUVWXYZ'; return i < L.length ? L[i] : 'A' + String.fromCharCode(65 + i - L.length); },
+  colunas(xFim) {   // [eixo, x] de cada linha de eixo; a leste do último eixo continua com o último espaçamento
+    const c = COLX.map(e => [...e]), d = c[c.length - 1][1] - c[c.length - 2][1];
+    while (c[c.length - 1][1] < xFim) c.push([c[c.length - 1][0] + 1, c[c.length - 1][1] + d]);
+    return c;
+  },
+};
 function faixaX(a, b, xa = null, xb = null) {
   const x0 = xa ?? xEixo(a), x1 = xb ?? xEixo(b); let ymin = Infinity, ymax = -Infinity;
   for (const p of pisosAterro) { const c = clipRet(p.pts, x0, x1, -1e5, 1e5); c.forEach(q => { ymin = Math.min(ymin, q[1]); ymax = Math.max(ymax, q[1]); }); }
@@ -1137,14 +1147,23 @@ function construirAterro() {
   const xIni = Math.max(...[...zonas.values()].filter(z => z.b != null && !z.laje).map(z => xEixo(z.b)).filter(v => v != null));
   const xFim = Math.max(...pisosAterro.flatMap(p => p.pts.map(q => q[0])));
   // ---- pátio em células de 12 m, cada uma com a cota do terreno atual: abaixo do nível médio do mar = aterro; acima = terraplanagem ----
+  // malha de controle: colunas = eixos da laje prolongados pelo pátio (quadrado "3-Q" fica entre os eixos 3 e 4), linhas de 10 m
+  // com letras novas (P, Q, R... da laje para o sul; depois de Z: AA, AB...) para não confundir com as linhas A–N das estacas
   const cels = [];
   {
-    const L = 12, xs = pisosAterro.flatMap(p => p.pts.map(q => q[0])), ys = pisosAterro.flatMap(p => p.pts.map(q => q[1]));
-    const X0 = xIni - L * Math.ceil((xIni - Math.min(...xs)) / L), Y0 = Math.min(...ys), Y1 = Math.max(...ys);
-    for (let x = X0; x < xFim; x += L) for (let y = Y0; y < Y1; y += L) for (const p of pisosAterro) {
-      const c = clipRet(p.pts, x, Math.min(x + L, xFim), y, y + L), a = c.length >= 3 ? areaPoli(c) : 0; if (a < 1) continue;
-      const cx = c.reduce((s, q) => s + q[0], 0) / c.length, cy = c.reduce((s, q) => s + q[1], 0) / c.length, zt = zTerreno(cx, cy);
-      cels.push({ pts: c, a, cx, cy, z: zt ?? -5, terra: zt != null && zt > NMM, leste: cx >= xIni });
+    const ys = pisosAterro.flatMap(p => p.pts.map(q => q[1])), Y1 = Math.max(...ys), Y0 = Math.min(...ys);
+    const XB = MALHA.colunas(xFim);
+    for (let i = 0; (Y1 - i * MALHA.passoY) > Y0; i++) {
+      const yb = Y1 - i * MALHA.passoY, ya = yb - MALHA.passoY, letra = MALHA.letra(i);
+      for (let j = 0; j < XB.length - 1; j++) {
+        const [k, x0] = XB[j], [, x1] = XB[j + 1]; let parte = 0;
+        for (const p of pisosAterro) {
+          const c = clipRet(p.pts, x0, x1, ya, yb), a = c.length >= 3 ? areaPoli(c) : 0; if (a < 1) continue;
+          const cx = c.reduce((s, q) => s + q[0], 0) / c.length, cy = c.reduce((s, q) => s + q[1], 0) / c.length, zt = zTerreno(cx, cy);
+          const id = `${k}-${letra}${parte++ ? '.' + parte : ''}`;
+          cels.push({ pts: c, a, cx, cy, z: zt ?? -5, terra: zt != null && zt > NMM, leste: cx >= xIni - .01, id, col: k, lin: letra, x0, x1, ya, yb, zonas: [] });
+        }
+      }
     }
   }
   // parte leste: a frente parte do trecho já aterrado (oeste), da borda sul e da borda sudeste e avança para a laje.
@@ -1217,7 +1236,8 @@ function construirAterro() {
       for (const c of lista) {
         const [b, t] = cotas(z, c); if (t - b < .01) continue;
         const m = extrusao(c.pts, yEL(t) + eps, t - b, mat); m.castShadow = false; m.visible = false;
-        m.userData.r0 = ac / tot; ac += c.a; m.userData.r1 = ac / tot;
+        m.userData.r0 = ac / tot; ac += c.a; m.userData.r1 = ac / tot; m.userData.cel = c.id;
+        c.zonas.push({ nome: z.nome, tipo: z.tipo, ini: ini + (fim - ini) * m.userData.r0, fim: ini + (fim - ini) * m.userData.r1 });   // previsão do P6 para este quadrado
         if (c.cant && z.tipo !== 'hid') { const j = JAN[z.tipo === 'pav' ? 'pav' : 'terra']; m.userData.cant = { ini: +fimCanteiro + j[0] * DIA, fim: +fimCanteiro + j[1] * DIA, r0: c.cant.r0, r1: c.cant.r1 }; }
         if (z.tipo === 'pav') m.userData.sob = pisoCel.get(c)?.m;
         else if (z.tipo !== 'hid') pisoCel.set(c, { m, fim: ini + (fim - ini) * m.userData.r1 });
@@ -1244,6 +1264,34 @@ function construirAterro() {
       ['Área no modelo', `${fmt(area)} m² ${T.dec}`],
     ] });
     aterroIds.push(id);
+  }
+  // ---- quadrados da malha: elementos clicáveis para registrar em campo o avanço do aterro ----
+  malhaExtra.forEach(o => o.parent && o.parent.remove(o)); malhaExtra = [];
+  const Ytopo = Math.max(...cels.map(c => c.yb)), linhas = [];
+  for (const c of cels) {
+    const P = c.pts; for (let i = 0; i < P.length; i++) { const a = P[i], b = P[(i + 1) % P.length]; linhas.push(a[0], .32, -a[1], b[0], .32, -b[1]); }
+    const mat = new THREE.MeshBasicMaterial({ color: 0x2f80c4, transparent: true, opacity: .5, depthWrite: false, visible: false, side: THREE.DoubleSide });
+    const plano = extrusao(c.pts, .3, .02, mat); plano.castShadow = plano.receiveShadow = false; plano.renderOrder = 3;
+    camada('Malha do aterro').add(plano);
+    const id = 'AT ' + c.id, mar = !c.terra;
+    registrar({ id, tipo: 'celula', grupo: 'malha', linha: c.lin, coluna: c.col, nome: `Quadrado ${c.id}`, mar, meshes: [plano],
+      caixa: new THREE.Box3(new THREE.Vector3(c.x0, yEL(Math.min(c.z, 0)), -c.yb), new THREE.Vector3(c.x1, .6, -c.ya)), info: () => [
+        ['Código', `<b>${c.id}</b> — entre os eixos ${c.col} e ${c.col + 1}, linha ${c.lin} ${T.dec}<br><span class="nota">linha ${c.lin} = faixa de ${fmt(Ytopo - c.yb)} a ${fmt(Ytopo - c.ya)} m da borda norte do pátio (junto à laje)</span>`],
+        ['Área no pátio', `${fmt(c.a)} m² ${T.int}`],
+        ['Terreno atual', `${c.terra ? 'terra' : 'mar'}, cota ~${fmt(c.z, 1)} (DHN) ${T.int}<br><span class="nota">curvas de nível do DRA-00001; o pátio fica em ${fmtEL(EL0)}</span>`],
+        ['Previsto no P6', c.zonas.length ? c.zonas.map(z => `${esc(z.nome)}: ${fmtD(new Date(z.ini))} → ${fmtD(new Date(z.fim))}`).join('<br>') + ` ${T.int}<br><span class="nota">datas da frente distribuídas pelos quadrados na ordem de avanço</span>` : '—'],
+        ['Como registrar', `<span class="nota">No Controle da obra abaixo: <b>Concluído</b> com a data em que o quadrado chegou à cota do pátio; <b>Em andamento</b> com o avanço (%). Na animação, o registro de campo vale mais que o P6. Use "Aplicar à linha" ou "Aplicar à coluna" para registrar vários de uma vez.</span>`],
+      ] });
+    aterroIds.push(id);
+  }
+  for (const zid of aterroIds) for (const m of objetos.get(zid)?.meshes || []) if (m.userData.cel) m.userData.id = 'AT ' + m.userData.cel;   // clicar no aterro seleciona o quadrado
+  if (linhas.length) {
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(linhas, 3));
+    const ls = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1e3a5f, transparent: true, opacity: .45 })); camada('Malha do aterro').add(ls); malhaExtra.push(ls);
+    const porLin = new Map(), porCol = new Map();
+    for (const c of cels) { if (!porLin.has(c.lin)) porLin.set(c.lin, []); porLin.get(c.lin).push(c); if (!porCol.has(c.col)) porCol.set(c.col, []); porCol.get(c.col).push(c); }
+    for (const [l, cs] of porLin) { const w = cs.reduce((a, b) => a.x0 < b.x0 ? a : b); malhaExtra.push(rotulo(l, V(w.x0 - 4, (w.ya + w.yb) / 2, 1), 'lbl eixo', 'Malha do aterro')); }
+    for (const [k, cs] of porCol) { const s = cs.reduce((a, b) => a.ya < b.ya ? a : b); malhaExtra.push(rotulo(String(k), V((s.x0 + s.x1) / 2, s.ya - 4, 1), 'lbl eixo', 'Malha do aterro')); }
   }
   // terreno sob os prédios definitivos em área de aterro/corte: pronto na semana anterior à 1ª atividade do prédio
   // (as células de corte/aterro são aproximadas e podem terminar depois da fundação real)
@@ -1547,6 +1595,11 @@ function aplicarCores() {
   inst.instanceColor.needsUpdate = true;
   for (const o of objetos.values()) {
     if (o.tipo === 'quadra' || o.tipo === 'ponto') continue;
+    if (o.tipo === 'celula') {   // quadrado da malha: pintado pelo status registrado (no cronograma, só a partir da data)
+      const st = modoCor === 'crono' ? campo(o.id, cronoD) : (statusDe(o.id) !== 'nao' ? statusDe(o.id) : null), mt = o.meshes[0].material;
+      mt.visible = !!st || o.id === selecionado; mt.color.setHex(st ? COR_STATUS[st] : 0x2f80c4); mt.opacity = o.id === selecionado ? .75 : .5;
+      continue;
+    }
     if (o.tipo === 'aterro') {   // cresce conforme o avanço das atividades do P6
       const f = modoCor !== 'crono' ? 0 : o.sub === 'fixo' ? 1 : fracComCampo(o.id, fracCrono(o.id));
       o.meshes.forEach(m => {
@@ -1554,6 +1607,13 @@ function aplicarCores() {
         if (u.cant && modoCor === 'crono' && !campo(o.id, cronoD)) {   // sob o canteiro: só depois da desmobilização, de oeste para leste (registro de campo prevalece)
           const fw = Math.max(0, Math.min(1, (cronoD - u.cant.ini) / (u.cant.fim - u.cant.ini)));
           lf = Math.max(0, Math.min(1, (fw - u.cant.r0) / Math.max(u.cant.r1 - u.cant.r0, 1e-6)));
+        }
+        if (u.cel && modoCor === 'crono' && o.sub !== 'pav') {   // registro de campo do quadrado da malha vale mais que o P6
+          const idc = 'AT ' + u.cel, fc = campo(idc, cronoD);
+          if (fc) {
+            const av = controle[idc].avanco, p = fc === 'ok' ? 1 : (av !== '' && av != null ? +av / 100 : .5), mar = objetos.get(idc)?.mar;
+            lf = !mar || fc === 'ok' ? p : o.sub === 'hid' ? Math.min(1, p * 2) : o.sub === 'conf' ? Math.max(0, p * 2 - 1) : p;   // no mar: 1ª metade = aterro hidráulico, 2ª = conformação
+          }
         }
         if (u.sob && !(u.sob.userData.lf >= .999)) lf = 0;   // pavimento só sobre aterro/terraplanagem pronto
         u.lf = lf; m.visible = lf > 0.002; m.scale.y = Math.max(lf, 0.002); m.material.emissive.setHex(o.id === selecionado ? 0x1d4ed8 : 0); m.material.emissiveIntensity = o.id === selecionado ? .45 : 0; });
@@ -1609,7 +1669,7 @@ function aplicarVisCrono() {
   const fim = so && cronoMax && cronoD >= cronoMax;   // obra concluída: entra o pátio em operação (contêineres, RTGs, estantes...)
   inst.visible = !so || fim;
   for (const o of objetos.values()) {
-    if (o.tipo === 'aterro' || o.id === 'ATERRO' || o.tipo === 'canteiro') continue;   // controlados em aplicarCores
+    if (o.tipo === 'aterro' || o.id === 'ATERRO' || o.tipo === 'canteiro' || o.tipo === 'celula') continue;   // controlados em aplicarCores
     let vis = true;
     if (so) { const s = estadoCrono(o.id, cronoD, cronoModo); vis = campo(o.id, cronoD) ? true : s ? (s.feitos.size + s.fazendo.size) > 0 && !(o.chao && cronoD < o.chao) : fim; }
     (o.meshes || []).forEach(m => m.visible = vis);
@@ -1659,12 +1719,12 @@ const LISTA_CAMADAS = [
   ['Torres de iluminação', 0x9aa4ae, true], ['Laje estaqueada', 0xb9bec4, true], ['Pátio em aterro', 0xd2bf98, true],
   ['Faixas entre quadras', 0x5b6168, true], ['Enrocamento', 0x7a5230, true], ['Terminal existente', 0x5f6b78, true],
   ['Estacas', COR_F.e1219, true], ['Estacas raiz', COR_F.raiz, true], ['Capitéis', COR_F.cap, true], ['Vigas transversais', 0x5f7f99, true], ['Vigas U/J', COR_F.viga, true], ['Pré-lajes', 0xc2b8a3, true], ['Concreto moldado 1ª fase', 0x7f9172, true], ['Concreto moldado 2ª fase', 0xd4c9a8, true],
-  ['Blocos (apoio/encontro)', COR_F.enc, true], ['Eixos estruturais', 0xdc2626, false], ['Fundo do mar', 0xa9a58f, true], ['Aterro executado (cronograma)', 0xc7b083, true], ['Canteiro de obras', 0xf4f6f8, false], ['Imagem de satélite', 0x4d7c0f, true],
+  ['Blocos (apoio/encontro)', COR_F.enc, true], ['Eixos estruturais', 0xdc2626, false], ['Fundo do mar', 0xa9a58f, true], ['Aterro executado (cronograma)', 0xc7b083, true], ['Malha do aterro', 0x2f80c4, false], ['Canteiro de obras', 0xf4f6f8, false], ['Imagem de satélite', 0x4d7c0f, true],
   ['Pontos A–M', 0xb91c1c, false], ['Rótulos', 0x1e3a5f, true],
 ];
 // camadas em grupos: o que é OBRA, o que é OPERAÇÃO (visual do terminal pronto) e o CONTEXTO do entorno
 const GRUPOS_CAMADAS = [
-  ['obra', 'Obra', ['Laje estaqueada', 'Pátio em aterro', 'Aterro executado (cronograma)', 'Estacas', 'Estacas raiz', 'Capitéis', 'Vigas transversais', 'Vigas U/J', 'Pré-lajes',
+  ['obra', 'Obra', ['Laje estaqueada', 'Pátio em aterro', 'Aterro executado (cronograma)', 'Malha do aterro','Estacas', 'Estacas raiz', 'Capitéis', 'Vigas transversais', 'Vigas U/J', 'Pré-lajes',
     'Concreto moldado 1ª fase', 'Concreto moldado 2ª fase', 'Blocos (apoio/encontro)', 'Enrocamento', 'Edificações', 'Canteiro de obras', 'Eixos estruturais', 'Pontos A–M']],
   ['oper', 'Operação (visual final)', ['Contêineres', 'RTGs', 'Estantes reefer', 'Torres de iluminação', 'Faixas entre quadras']],
   ['ctx', 'Contexto', ['Imagem de satélite', 'Terminal existente', 'Fundo do mar', 'Rótulos']],
@@ -1711,7 +1771,7 @@ document.querySelectorAll('#modoCor button').forEach(b => b.addEventListener('cl
   document.querySelectorAll('#modoCor button').forEach(x => x.classList.toggle('on', x === b)); modoCor = b.dataset.m;
   $('#painelCrono').hidden = modoCor !== 'crono';
   if (modoCor === 'crono') configurarCrono();
-  setChk('Canteiro de obras', modoCor === 'crono'); aplicarCamadas();   // canteiro é provisório e ocupa o pátio: aparece só no cronograma (ou pelo botão Canteiro)
+  setChk('Canteiro de obras', modoCor === 'crono'); setChk('Malha do aterro', modoCor === 'crono'); aplicarCamadas();   // canteiro é provisório e ocupa o pátio: aparece só no cronograma (ou pelo botão Canteiro)
   aplicarCores();
 }));
 
@@ -1728,6 +1788,7 @@ function selecionar(id, voar = false) {
   const c = controle[id] || {};
   const st = c.status || 'nao';
   const irmaos = o.grupo && o.linha ? [...objetos.values()].filter(x => x.grupo === o.grupo && x.linha === o.linha) : [];
+  const irmaosCol = o.grupo === 'malha' ? [...objetos.values()].filter(x => x.grupo === 'malha' && x.coluna === o.coluna) : [];   // quadrados do mesmo eixo
   dir.innerHTML = `<div class="sec inf">
       <div class="btns" style="justify-content:space-between;align-items:center"><h2>${esc(o.nome)}</h2><button class="btn" id="fechar">✕</button></div>
       <div class="sub">${esc(id)}</div>
@@ -1746,7 +1807,7 @@ function selecionar(id, voar = false) {
       <p class="nota" style="margin:2px 0 0">Na animação do cronograma o elemento aparece com este status a partir desta data (sem data: a partir de quando foi salvo).</p>
       <label class="f">Observações</label>
       <textarea id="cObs" placeholder="Ex.: pendências, frente de serviço, responsável">${esc(c.obs || '')}</textarea>
-      <div class="btns" style="margin-top:10px"><button class="btn pri" id="cSalvar">Salvar</button>${irmaos.length > 1 ? `<button class="btn" id="cSalvarLinha">Aplicar à linha ${esc(o.linha)} (${irmaos.length} ${esc((NOME_GRUPO[o.grupo] || 'elementos').toLowerCase())})</button>` : ''}</div>
+      <div class="btns" style="margin-top:10px"><button class="btn pri" id="cSalvar">Salvar</button>${irmaos.length > 1 ? `<button class="btn" id="cSalvarLinha">Aplicar à linha ${esc(o.linha)} (${irmaos.length} ${esc((NOME_GRUPO[o.grupo] || 'elementos').toLowerCase())})</button>` : ''}${irmaosCol.length > 1 ? `<button class="btn" id="cSalvarCol">Aplicar à coluna do eixo ${o.coluna} (${irmaosCol.length} quadrados)</button>` : ''}</div>
       ${c.atualizado ? `<p class="nota">Atualizado em ${new Date(c.atualizado).toLocaleString('pt-BR')}</p>` : ''}
       <p class="nota">Nenhum dado de controle vem do DWG. Estes campos são preenchidos por você.</p>
     </div>`;
@@ -1760,6 +1821,10 @@ function selecionar(id, voar = false) {
   if ($('#cSalvarLinha')) $('#cSalvarLinha').onclick = () => {
     const r = lerForm(); irmaos.forEach(x => controle[x.id] = { ...r });
     salvarControle(); toast(`Aplicado a ${irmaos.length} elementos da linha ${o.linha}`); selecionar(id);
+  };
+  if ($('#cSalvarCol')) $('#cSalvarCol').onclick = () => {
+    const r = lerForm(); irmaosCol.forEach(x => controle[x.id] = { ...r });
+    salvarControle(); toast(`Aplicado a ${irmaosCol.length} quadrados do eixo ${o.coluna}`); selecionar(id);
   };
   aplicarCores();
   if (voar) voarPara(b);
