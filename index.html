@@ -182,7 +182,8 @@ textarea{min-height:64px;resize:vertical}
         <button class="btn" id="cronoHoje">Data dos dados</button>
         <input type="file" id="cronoArq" accept=".xer" hidden>
       </div>
-      <label class="f">Baixar a simulação em vídeo (usa a vista atual da câmera)</label>
+      <label class="f">Baixar a simulação em vídeo</label>
+      <label class="chk" title="A câmera abre com a vista geral, aproxima-se dos elementos em execução semana a semana e fecha com a vista geral. Com o botão Fundação ou Canteiro ligado, acompanha só essa parte da obra."><input type="checkbox" id="videoCamera" checked>🎥 Câmera acompanha a frente em execução <span class="nota" id="videoFoco"></span></label>
       <div class="btns">
         <button class="btn" id="videoPlan" title="Animação semana a semana pelo cronograma P6">🎬 Previsto</button>
         <button class="btn" id="videoReal" title="Animação semana a semana pelo realizado: P6 real + registros de campo">🎬 Realizado</button>
@@ -1782,6 +1783,7 @@ let modoFund = false;
 const setChk = (nome, v) => { const i = document.querySelector(`#camadas input[data-c="${nome}"]`); if (i) i.checked = v; };
 $('#modoFund').onclick = () => {
   modoFund = !modoFund; $('#modoFund').classList.toggle('on', modoFund);
+  if (modoFund && focoCanteiro) marcarFocoCanteiro(false); atualizarFocoVideo();
   ['Contêineres', 'RTGs', 'Estantes reefer', 'Rótulos'].forEach(n => setChk(n, !modoFund));
   setChk('Eixos estruturais', modoFund); setChk('Imagem de satélite', !modoFund);   // a imagem cobre o que está abaixo do nível do mar
   $('#lajeTransp').checked = modoFund; aplicarTransp(); aplicarCamadas(); desenharLegenda();
@@ -1871,11 +1873,16 @@ function voarPara(b) {
 }
 const VISTA_INI = { pos: new THREE.Vector3(-250, 300, 380), alvo: new THREE.Vector3(10, 0, -10) };
 camera.position.copy(VISTA_INI.pos); controls.target.copy(VISTA_INI.alvo);
-$('#recentrar').onclick = () => { animar(VISTA_INI.pos.clone(), VISTA_INI.alvo.clone()); $('#vista3d').classList.add('on'); $('#vistaPlanta').classList.remove('on'); };
+$('#recentrar').onclick = () => { if (typeof marcarFocoCanteiro === 'function' && focoCanteiro) marcarFocoCanteiro(false); animar(VISTA_INI.pos.clone(), VISTA_INI.alvo.clone()); $('#vista3d').classList.add('on'); $('#vistaPlanta').classList.remove('on'); };
 $('#vista3d').onclick = () => { $('#recentrar').onclick(); };
 $('#vistaPlanta').onclick = () => { const a = controls.target.clone(); animar(new THREE.Vector3(a.x, 620, a.z + .01), a); $('#vistaPlanta').classList.add('on'); $('#vista3d').classList.remove('on'); };
 $('#btnPainel').onclick = () => $('#esq').classList.toggle('aberto');
+let focoCanteiro = false;   // botão Canteiro ligado: o vídeo acompanha o canteiro
+function marcarFocoCanteiro(v) { focoCanteiro = v; $('#irCanteiro').classList.toggle('on', v); atualizarFocoVideo(); }
 $('#irCanteiro').onclick = () => {
+  if (focoCanteiro) { marcarFocoCanteiro(false); return; }
+  if (modoFund) $('#modoFund').onclick();
+  marcarFocoCanteiro(true);
   setChk('Canteiro de obras', true); aplicarCamadas(); aplicarCores();   // aplicarCores reaplica o modo "só executado"
   const xs = CANT.predios.map(p => p.c[0]), ys = CANT.predios.map(p => p.c[1]);
   const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
@@ -2107,6 +2114,61 @@ function desenharQuadro(g, W, H, subtitulo) {
   g.fillStyle = 'rgba(30,58,95,.25)'; g.fillRect(0, H - 8 * k, W, 8 * k); g.fillStyle = '#16a34a'; g.fillRect(0, H - 8 * k, W * f, 8 * k);
 }
 let gravando = false;
+// ---- câmera do vídeo: abre com a vista geral, acompanha os elementos EM EXECUÇÃO semana a semana e fecha com a vista geral ----
+// O foco segue o botão ligado no cabeçalho: Fundação → estacas e superestrutura; Canteiro → canteiro; nenhum → obra toda.
+const FOCO_TIPOS = { fund: ['estaca', 'pm', 'capitel', 'viga', 'cml', 'bloco'], canteiro: ['canteiro'], tudo: null };
+const NOME_FOCO = { fund: 'Fundação', canteiro: 'Canteiro de obras', tudo: 'Obra completa' };
+const focoVideo = () => modoFund ? 'fund' : focoCanteiro ? 'canteiro' : 'tudo';
+function atualizarFocoVideo() { const e = $('#videoFoco'); if (e) e.textContent = `(foco: ${NOME_FOCO[focoVideo()]})`; }
+const centrosObj = new Map();
+function centroObj(o) {   // centro e raio de cada elemento (as peças não se movem: calcula uma vez)
+  if (centrosObj.has(o.id)) return centrosObj.get(o.id);
+  const b = new THREE.Box3(); (o.meshes || []).forEach(m => { m.updateMatrixWorld(true); b.expandByObject(m); });
+  const c = b.isEmpty() ? null : { p: b.getCenter(new THREE.Vector3()), r: b.getSize(new THREE.Vector3()).length() / 2 };
+  centrosObj.set(o.id, c); return c;
+}
+function enquadrar(pts, pct) {   // centro robusto (mediana) e raio que cobre "pct" dos elementos (ignora pontos isolados)
+  if (!pts.length) return null;
+  const med = k => { const a = pts.map(q => q.p[k]).sort((x, y) => x - y); return a[a.length >> 1]; };
+  const c = new THREE.Vector3(med('x'), med('y'), med('z'));
+  const d = pts.map(q => q.p.distanceTo(c) + Math.min(q.r, 40)).sort((x, y) => x - y);
+  return { c, r: d[Math.floor((d.length - 1) * pct)] };
+}
+function frenteAtiva(D, tipos, modos) {   // elementos em execução na data (P6 previsto/real e, no realizado, registros "em andamento"/"paralisado")
+  const pts = [];
+  for (const o of objetos.values()) {
+    if (tipos ? !tipos.includes(o.tipo) : o.tipo === 'celula') continue;
+    let ativo = false;
+    if (porElem.has(o.id)) for (const m of modos) { const e = estadoCrono(o.id, D, m); if (e && e.fazendo.size) { ativo = true; break; } }
+    if (!ativo && modos.includes('real') && controle[o.id]) { const st = campo(o.id, D); ativo = st === 'and' || st === 'par'; }
+    if (ativo) { const c = centroObj(o); if (c) pts.push(c); }
+  }
+  return pts;
+}
+function criarCameraVideo(foco, modos, zoom = 1) {   // zoom > 1 afasta (tela dividida: cada metade é estreita)
+  const tipos = FOCO_TIPOS[foco], fund = foco === 'fund';
+  const todos = [...objetos.values()].filter(o => (tipos ? tipos.includes(o.tipo) : o.tipo !== 'celula') && (porElem.has(o.id) || o.tipo === 'canteiro')).map(centroObj).filter(Boolean);
+  const g = enquadrar(todos, .95); if (!g) return null;
+  const DMIN = (fund ? 85 : 110) * zoom, distGeral = Math.max(160, g.r * 2.1) * zoom, incl = fund ? .33 : .62;   // inclinação da câmera (rad)
+  const az0 = Math.atan2(camera.position.x - controls.target.x, camera.position.z - controls.target.z); let az = az0, t = 0;
+  const alvo = g.c.clone(), alvoObj = g.c.clone(); let dist = distGeral, distObj = distGeral;
+  const aplicar = () => {
+    anim = null; const hz = dist * Math.cos(incl);
+    camera.position.set(alvo.x + hz * Math.sin(az), Math.max(alvo.y + dist * Math.sin(incl), fund ? 24 : 40), alvo.z + hz * Math.cos(az));   // nunca desce para baixo da laje
+    controls.target.copy(alvo); controls.update();
+  };
+  aplicar();
+  return {
+    nome: NOME_FOCO[foco],
+    semana(D) {   // sem nada em execução na semana, recua para a vista geral
+      const f = enquadrar(frenteAtiva(D, tipos, modos), .8);
+      if (f) { alvoObj.copy(f.c); distObj = Math.min(distGeral, Math.max(DMIN, f.r * 2.6 * zoom)); } else this.geral();
+    },
+    geral() { alvoObj.copy(g.c); distObj = distGeral; },
+    passo(k = .05) { alvo.lerp(alvoObj, k); dist += (distObj - dist) * k; az = az0 + .22 * Math.sin(++t * .006); aplicar(); },   // movimento suave + balanço lento (±13°)
+  };
+}
+atualizarFocoVideo();
 // ---- gravador MP4 padrão (H.264 + AAC, índice no início do arquivo) — aceito pelo PowerPoint, WhatsApp e players comuns ----
 // Quadros com carimbo de tempo fixo (30 qps): o vídeo não depende da velocidade do computador. Trilha de áudio AAC silenciosa.
 const MP4_MUXER = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/build/mp4-muxer.mjs';
@@ -2172,17 +2234,22 @@ async function gravarVideo(modo, baixar = true) {
   if (cronoPlay) $('#cronoPlay').onclick();
   document.querySelectorAll('#cronoModo button').forEach(x => x.classList.toggle('on', x.dataset.c === modo)); cronoModo = modo;
   $('#cronoSoExec').checked = true; tamFixo = [W, H]; redimensionar();
-  const sub = modo === 'real' ? 'Realizado — datas reais do P6 + registros de campo' : 'Previsto — cronograma P6';
+  const cam = $('#videoCamera').checked ? criarCameraVideo(focoVideo(), [modo]) : null;
+  const sub = (modo === 'real' ? 'Realizado — datas reais do P6 + registros de campo' : 'Previsto — cronograma P6') + (cam ? ` · foco: ${cam.nome}` : '');
+  const quadros = async n => {   // com câmera em movimento, cada quadro é renderizado; com câmera fixa, repete o quadro
+    if (!cam) { await capturar(() => desenharQuadro(g, W, H, sub)); return grav.quadro(c2, n); }
+    for (let i = 0; i < n; i++) { cam.passo(); await capturar(() => desenharQuadro(g, W, H, sub)); await grav.quadro(c2, 1); }
+  };
   let blob = null;
   try {
-    atualizarDataCrono(new Date(cronoMin)); await capturar(() => desenharQuadro(g, W, H, sub)); await grav.quadro(c2, 36);
+    atualizarDataCrono(new Date(cronoMin)); await quadros(36);
     const fimV = fimAnimacao();
     for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, fimV.getTime()))) {
-      atualizarDataCrono(d); await capturar(() => desenharQuadro(g, W, H, sub)); await grav.quadro(c2, 9);   // 0,3 s por semana
+      atualizarDataCrono(d); cam?.semana(d); await quadros(9);   // 0,3 s por semana
       toast(`Gravando vídeo do ${modo === 'real' ? 'realizado' : 'previsto'}… ${Math.round(100 * (d - cronoMin) / (fimV - cronoMin))}%`);
       if (d >= fimV) break;
     }
-    await grav.quadro(c2, 60);
+    cam?.geral(); await quadros(cam ? 90 : 60);   // fecha voltando à vista geral
     blob = await grav.fechar();
   } catch (e) { console.error(e); toast('Falha ao gravar o vídeo: ' + e.message); }
   finally { posRender = null; gravando = false; tamFixo = null; redimensionar(); botoes.forEach(b => b.disabled = false); }
@@ -2228,18 +2295,27 @@ async function gravarComparativo(baixar = true) {
     g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, x, HD, W / 2, H - HD);
   });
   tamFixo = [W / 2, H - HD]; redimensionar();
+  const cam = $('#videoCamera').checked ? criarCameraVideo(focoVideo(), ['plan', 'real'], 1.4) : null;
   // com registros de campo até uma data de status anterior ao fim do cronograma, o comparativo termina nela (o realizado depois disso ainda não existe)
   setModo('real'); const uc = ultimoCampo(), fim = uc && uc < +cronoMax ? new Date(uc) : fimAnimacao(); let blob = null, primeiro = true;
   try {
-    for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, fim.getTime()))) {
+    const quadroComp = async d => {   // renderiza as duas metades na data d e monta a moldura
       semCampo = true; setModo('plan'); atualizarDataCrono(d); await metade(0); const kp = lerKpis();
       semCampo = false; setModo('real'); atualizarDataCrono(d); await metade(W / 2); const kr = lerKpis();
       molduraComparativo(g, W, H, HD, d, kp, kr, (d - cronoMin) / (fim - cronoMin));
-      await grav.quadro(buf, primeiro ? 36 : 12); primeiro = false;   // 0,4 s por semana
+    };
+    const quadros = async (d, n) => {   // câmera em movimento: renderiza todo quadro; câmera fixa: repete o quadro
+      if (!cam) { await quadroComp(d); return grav.quadro(buf, n); }
+      for (let i = 0; i < n; i++) { cam.passo(); await quadroComp(d); await grav.quadro(buf, 1); }
+    };
+    let dUlt = new Date(cronoMin);
+    for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, fim.getTime()))) {
+      if (!primeiro) cam?.semana(d);
+      await quadros(d, primeiro ? 36 : 12); primeiro = false; dUlt = d;   // 0,4 s por semana
       toast(`Gravando previsto × realizado… ${Math.round(100 * (d - cronoMin) / (fim - cronoMin))}%`);
       if (d >= fim) break;
     }
-    await grav.quadro(buf, 72);   // segura o último quadro
+    cam?.geral(); await quadros(dUlt, cam ? 90 : 72);   // fecha voltando à vista geral (ou segura o último quadro)
     blob = await grav.fechar();
   } catch (e) { console.error(e); toast('Falha ao gravar o vídeo: ' + e.message); }
   finally {
