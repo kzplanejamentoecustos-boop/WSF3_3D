@@ -2228,7 +2228,8 @@ async function gravarComparativo(baixar = true) {
     g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, x, HD, W / 2, H - HD);
   });
   tamFixo = [W / 2, H - HD]; redimensionar();
-  setModo('real'); const fim = fimAnimacao(); let blob = null, primeiro = true;
+  // com registros de campo até uma data de status anterior ao fim do cronograma, o comparativo termina nela (o realizado depois disso ainda não existe)
+  setModo('real'); const uc = ultimoCampo(), fim = uc && uc < +cronoMax ? new Date(uc) : fimAnimacao(); let blob = null, primeiro = true;
   try {
     for (let d = new Date(cronoMin); ; d = new Date(Math.min(d.getTime() + 7 * DIA, fim.getTime()))) {
       semCampo = true; setModo('plan'); atualizarDataCrono(d); await metade(0); const kp = lerKpis();
