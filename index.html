@@ -183,7 +183,7 @@ textarea{min-height:64px;resize:vertical}
         <input type="file" id="cronoArq" accept=".xer" hidden>
       </div>
       <label class="f">Baixar a simulação em vídeo</label>
-      <label class="chk" title="A câmera abre com a vista geral, aproxima-se dos elementos em execução semana a semana e fecha com a vista geral. Com o botão Fundação ou Canteiro ligado, acompanha só essa parte da obra."><input type="checkbox" id="videoCamera" checked>🎥 Câmera acompanha a frente em execução <span class="nota" id="videoFoco"></span></label>
+      <label class="chk" title="A câmera segue um roteiro fixo: abre com a vista geral, aproxima, percorre a obra no sentido em que ela avança no cronograma previsto e fecha com a vista geral. O roteiro depende do botão ligado no cabeçalho: Fundação, Canteiro ou nenhum (obra completa). Desmarcado, grava da posição atual da câmera."><input type="checkbox" id="videoCamera" checked>🎥 Câmera com roteiro <span class="nota" id="videoFoco"></span></label>
       <div class="btns">
         <button class="btn" id="videoPlan" title="Animação semana a semana pelo cronograma P6">🎬 Previsto</button>
         <button class="btn" id="videoReal" title="Animação semana a semana pelo realizado: P6 real + registros de campo">🎬 Realizado</button>
@@ -2121,12 +2121,17 @@ function desenharQuadro(g, W, H, subtitulo) {
   g.fillStyle = 'rgba(30,58,95,.25)'; g.fillRect(0, H - 8 * k, W, 8 * k); g.fillStyle = '#16a34a'; g.fillRect(0, H - 8 * k, W * f, 8 * k);
 }
 let gravando = false;
-// ---- câmera do vídeo: abre com a vista geral, acompanha os elementos EM EXECUÇÃO semana a semana e fecha com a vista geral ----
-// O foco segue o botão ligado no cabeçalho: Fundação → estacas e superestrutura; Canteiro → canteiro; nenhum → obra toda.
+// ---- câmera do vídeo: ROTEIRO FIXO por tipo de visão (botão ligado no cabeçalho) ----
+// A câmera não persegue as frentes: segue uma sequência de tomadas definida pelo cronograma PREVISTO — abertura geral,
+// aproximação onde a frente começa, travelling até onde ela termina, fechamento geral. É o mesmo roteiro no previsto,
+// no realizado e no comparativo, e não muda de uma gravação para outra.
+//   Fundação  → percorre o cais da primeira à última estaca/laje, câmera baixa do lado do mar;
+//   Canteiro  → órbita lenta em volta do canteiro;
+//   nenhum    → ato 1: fundação (cais); ato 2: aterro/pátio; fecha com a obra toda.
 const FOCO_TIPOS = { fund: ['estaca', 'pm', 'capitel', 'viga', 'cml', 'bloco'], canteiro: ['canteiro'], tudo: null };
 const NOME_FOCO = { fund: 'Fundação', canteiro: 'Canteiro de obras', tudo: 'Obra completa' };
 const focoVideo = () => modoFund ? 'fund' : focoCanteiro ? 'canteiro' : 'tudo';
-function atualizarFocoVideo() { const e = $('#videoFoco'); if (e) e.textContent = `(foco: ${NOME_FOCO[focoVideo()]})`; }
+function atualizarFocoVideo() { const e = $('#videoFoco'); if (e) e.textContent = `(roteiro: ${NOME_FOCO[focoVideo()]})`; }
 const centrosObj = new Map();
 function centroObj(o) {   // centro e raio de cada elemento (as peças não se movem: calcula uma vez)
   if (centrosObj.has(o.id)) return centrosObj.get(o.id);
@@ -2141,38 +2146,74 @@ function enquadrar(pts, pct) {   // centro robusto (mediana) e raio que cobre "p
   const d = pts.map(q => q.p.distanceTo(c) + Math.min(q.r, 40)).sort((x, y) => x - y);
   return { c, r: d[Math.floor((d.length - 1) * pct)] };
 }
-function frenteAtiva(D, tipos, modos) {   // elementos em execução na data (P6 previsto/real e, no realizado, registros "em andamento"/"paralisado")
-  const pts = [];
+function itensRoteiro(tipos) {   // elementos do grupo com posição e datas PREVISTAS (início e fim)
+  const it = [];
   for (const o of objetos.values()) {
-    if (tipos ? !tipos.includes(o.tipo) : o.tipo === 'celula') continue;
-    let ativo = false;
-    if (porElem.has(o.id)) for (const m of modos) { const e = estadoCrono(o.id, D, m); if (e && e.fazendo.size) { ativo = true; break; } }
-    if (!ativo && modos.includes('real') && controle[o.id]) { const st = campo(o.id, D); ativo = st === 'and' || st === 'par'; }
-    if (ativo) { const c = centroObj(o); if (c) pts.push(c); }
+    if (!tipos.includes(o.tipo)) continue;
+    const c = centroObj(o); if (!c) continue;
+    let ini = 0, fim = 0;
+    if (o.tipo === 'celula') { fim = +o.prevFim || 0; ini = fim - 30 * DIA; }
+    else { const ps = porElem.get(o.id) || [], x = ps.map(q => +q.ps).filter(Boolean), y = ps.map(q => +q.pe).filter(Boolean); if (x.length) ini = Math.min(...x); if (y.length) fim = Math.max(...y); }
+    if (ini > 0 && fim > 0) it.push({ p: c.p, r: c.r, ini, fim });
   }
-  return pts;
+  return it;
 }
-function criarCameraVideo(foco, modos, zoom = 1) {   // zoom > 1 afasta (tela dividida: cada metade é estreita)
-  const tipos = FOCO_TIPOS[foco], fund = foco === 'fund';
-  const todos = [...objetos.values()].filter(o => (tipos ? tipos.includes(o.tipo) : o.tipo !== 'celula') && (porElem.has(o.id) || o.tipo === 'canteiro')).map(centroObj).filter(Boolean);
-  const g = enquadrar(todos, .95); if (!g) return null;
-  const DMIN = (fund ? 85 : 110) * zoom, distGeral = Math.max(160, g.r * 2.1) * zoom, incl = fund ? .33 : .62;   // inclinação da câmera (rad)
-  const az0 = Math.atan2(camera.position.x - controls.target.x, camera.position.z - controls.target.z); let az = az0, t = 0;
-  const alvo = g.c.clone(), alvoObj = g.c.clone(); let dist = distGeral, distObj = distGeral;
+function trilha(it) {   // onde a frente começa (A) e onde termina (B) no previsto, quando (t0–t1), centro e raio do grupo
+  if (it.length < 2) return null;
+  const s = [...it].sort((x, y) => x.fim - y.fim), n = Math.max(1, Math.round(s.length * .2));
+  const media = l => { const v = new THREE.Vector3(); l.forEach(q => v.add(q.p)); return v.divideScalar(l.length); };
+  const inis = it.map(q => q.ini).sort((x, y) => x - y), g = enquadrar(it, .95);
+  return { A: media(s.slice(0, n)), B: media(s.slice(-n)), t0: inis[Math.floor(inis.length * .02)], t1: s[Math.floor((s.length - 1) * .98)].fim, c: g.c, r: g.r };
+}
+function criarCameraVideo(foco, zoom = 1) {   // zoom > 1 afasta (tela dividida: cada metade é estreita)
+  const GR = Math.PI / 180, SEM = 7 * DIA, fund = foco === 'fund', ini = +cronoMin, fimT = +cronoMax;
+  const iF = itensRoteiro(FOCO_TIPOS.fund), iA = itensRoteiro(['celula']), iK = itensRoteiro(['canteiro']);
+  const F = trilha(iF), A = trilha(iA), K = trilha(iK);
+  const perto = T => Math.min(190, Math.max(110, T.r * .75)) * zoom, longe = T => Math.max(160, T.r * 2.1) * zoom;
+  const ch = [], k = (t, alvo, dist, az, incl) => ch.push({ t, alvo: alvo.clone(), dist, az: az * GR, incl });   // tomada: quando, para onde olha, distância, giro e inclinação
+  if (foco === 'fund' && F) {
+    const sp = F.t1 - F.t0, longe = T => Math.max(160, T.r * 1.45) * zoom;   // câmera baixa: a vista geral fica mais perto
+    k(ini, F.c, longe(F), -148, .33); k(F.t0, F.c, longe(F), -148, .33);            // abertura: o cais inteiro, do lado do mar
+    k(F.t0 + .08 * sp, F.A, perto(F), -162, .33);                                    // aproxima onde a fundação começa
+    k(F.t1 - .05 * sp, F.B, perto(F), -134, .33);                                    // travelling até onde ela termina
+    k(F.t1 + 4 * SEM, F.c, longe(F), -124, .36);                                     // fechamento
+  } else if (foco === 'canteiro' && K) {
+    const d = Math.max(110, K.r * 1.7) * zoom;
+    k(ini, K.c, d * 1.5, -62, .6); k(K.t0 + 2 * SEM, K.c, d, -52, .5);              // abertura e aproximação
+    k(fimT, K.c, d, -6, .5); k(fimT + 2 * SEM, K.c, d * 1.5, 4, .6);                 // órbita lenta e fechamento
+  } else {
+    const g = enquadrar([...iF, ...iA, ...iK], .95); if (!g) return null;
+    const dg = Math.max(160, g.r * 2.1) * zoom; let tAnt = ini;
+    k(ini, g.c, dg, -40, .62);                                                       // abertura: a obra toda
+    if (F) {
+      const tm = A ? Math.max(F.t0 + 12 * SEM, Math.min(F.t1, A.t0 + .25 * (A.t1 - A.t0))) : F.t1, sp = tm - F.t0;   // passa ao aterro quando ele já está em andamento
+      k(F.t0, g.c, dg, -40, .62);
+      k(F.t0 + .1 * sp, F.A, perto(F) * 1.25, -52, .5); k(tm, F.B, perto(F) * 1.25, -30, .5);   // ato 1: fundação, ao longo do cais
+      tAnt = tm;
+    }
+    if (A) { k(tAnt + 5 * SEM, A.A, perto(A) * 1.3, -20, .74); k(Math.max(tAnt + 10 * SEM, A.t1 - 2 * SEM), A.B, perto(A) * 1.3, -6, .74); }   // ato 2: aterro/pátio, mais do alto
+    k(Math.max(ch[ch.length - 1].t + 4 * SEM, fimT - 2 * SEM), g.c, dg, 6, .62);     // fechamento: a obra toda
+  }
+  if (!ch.length) return null;
+  for (let i = 1; i < ch.length; i++) if (ch[i].t <= ch[i - 1].t) ch[i].t = ch[i - 1].t + SEM;   // tomadas em ordem
+  const roteiro = T => {   // posição prevista no roteiro para a data T (transição suave entre tomadas)
+    if (T <= ch[0].t) return ch[0]; const u = ch[ch.length - 1]; if (T >= u.t) return u;
+    let i = 1; while (ch[i].t < T) i++;
+    const a = ch[i - 1], b = ch[i]; let f = (T - a.t) / (b.t - a.t); f = f * f * (3 - 2 * f);
+    return { alvo: a.alvo.clone().lerp(b.alvo, f), dist: a.dist + (b.dist - a.dist) * f, az: a.az + (b.az - a.az) * f, incl: a.incl + (b.incl - a.incl) * f };
+  };
+  const at = { alvo: ch[0].alvo.clone(), dist: ch[0].dist, az: ch[0].az, incl: ch[0].incl }; let obj = ch[0];
   const aplicar = () => {
-    anim = null; const hz = dist * Math.cos(incl);
-    camera.position.set(alvo.x + hz * Math.sin(az), Math.max(alvo.y + dist * Math.sin(incl), fund ? 24 : 40), alvo.z + hz * Math.cos(az));   // nunca desce para baixo da laje
-    controls.target.copy(alvo); controls.update();
+    anim = null; const hz = at.dist * Math.cos(at.incl);
+    camera.position.set(at.alvo.x + hz * Math.sin(at.az), Math.max(at.alvo.y + at.dist * Math.sin(at.incl), fund ? 24 : 40), at.alvo.z + hz * Math.cos(at.az));   // nunca desce para baixo da laje
+    controls.target.copy(at.alvo); controls.update();
   };
   aplicar();
   return {
-    nome: NOME_FOCO[foco],
-    semana(D) {   // sem nada em execução na semana, recua para a vista geral
-      const f = enquadrar(frenteAtiva(D, tipos, modos), .8);
-      if (f) { alvoObj.copy(f.c); distObj = Math.min(distGeral, Math.max(DMIN, f.r * 2.6 * zoom)); } else this.geral();
-    },
-    geral() { alvoObj.copy(g.c); distObj = distGeral; },
-    passo(k = .05) { alvo.lerp(alvoObj, k); dist += (distObj - dist) * k; az = az0 + .22 * Math.sin(++t * .006); aplicar(); },   // movimento suave + balanço lento (±13°)
+    nome: NOME_FOCO[foco], tomadas: ch,
+    semana(D) { obj = roteiro(+D); },
+    geral() { obj = ch[ch.length - 1]; },
+    passo(q = .07) { at.alvo.lerp(obj.alvo, q); at.dist += (obj.dist - at.dist) * q; at.az += (obj.az - at.az) * q; at.incl += (obj.incl - at.incl) * q; aplicar(); },   // amortece a passagem de semana a semana
   };
 }
 atualizarFocoVideo();
@@ -2242,8 +2283,8 @@ async function gravarVideo(modo, baixar = true) {
   if (cronoPlay) $('#cronoPlay').onclick();
   document.querySelectorAll('#cronoModo button').forEach(x => x.classList.toggle('on', x.dataset.c === modo)); cronoModo = modo;
   $('#cronoSoExec').checked = true; tamFixo = [W, H]; redimensionar();
-  const cam = $('#videoCamera').checked ? criarCameraVideo(focoVideo(), [modo]) : null;
-  const sub = (modo === 'real' ? 'Realizado — datas reais do P6 + registros de campo' : 'Previsto — cronograma P6') + (cam ? ` · foco: ${cam.nome}` : '');
+  const cam = $('#videoCamera').checked ? criarCameraVideo(focoVideo()) : null;
+  const sub = (modo === 'real' ? 'Realizado — datas reais do P6 + registros de campo' : 'Previsto — cronograma P6') + (cam ? ` · roteiro: ${cam.nome}` : '');
   const quadros = async n => {   // com câmera em movimento, cada quadro é renderizado; com câmera fixa, repete o quadro
     if (!cam) { await capturar(() => desenharQuadro(g, W, H, sub)); return grav.quadro(c2, n); }
     for (let i = 0; i < n; i++) { cam.passo(); await capturar(() => desenharQuadro(g, W, H, sub)); await grav.quadro(c2, 1); }
@@ -2303,7 +2344,7 @@ async function gravarComparativo(baixar = true) {
     g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, x, HD, W / 2, H - HD);
   });
   tamFixo = [W / 2, H - HD]; redimensionar();
-  const cam = $('#videoCamera').checked ? criarCameraVideo(focoVideo(), ['plan', 'real'], 1.4) : null;
+  const cam = $('#videoCamera').checked ? criarCameraVideo(focoVideo(), 1.4) : null;
   // com registros de campo até uma data de status anterior ao fim do cronograma, o comparativo termina nela (o realizado depois disso ainda não existe)
   setModo('real'); const uc = ultimoCampo(), fim = uc && uc < +cronoMax ? new Date(uc) : fimAnimacao(); let blob = null, primeiro = true;
   try {
@@ -2336,7 +2377,7 @@ $('#videoComp').onclick = () => gravarComparativo();
 $('#videoPlan').onclick = () => gravarVideo('plan');
 $('#videoReal').onclick = () => gravarVideo('real');
 
-window.TECON3D = { gravarVideo, gravarComparativo, camera: () => ({ pos: camera.position.toArray().map(v => +v.toFixed(2)), alvo: controls.target.toArray().map(v => +v.toFixed(2)), dist: +camera.position.distanceTo(controls.target).toFixed(2) }), desenhar: () => { limitarVista(); controls.update(); renderer.render(scene, camera); }, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
+window.TECON3D = { gravarVideo, gravarComparativo, roteiro: (foco = focoVideo()) => (criarCameraVideo(foco)?.tomadas || []).map(c => ({ data: new Date(c.t).toISOString().slice(0, 10), alvo: c.alvo.toArray().map(Math.round), dist: Math.round(c.dist), giro: Math.round(c.az * 180 / Math.PI), incl: c.incl })), camera: () => ({ pos: camera.position.toArray().map(v => +v.toFixed(2)), alvo: controls.target.toArray().map(v => +v.toFixed(2)), dist: +camera.position.distanceTo(controls.target).toFixed(2) }), desenhar: () => { limitarVista(); controls.update(); renderer.render(scene, camera); }, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
   rotuloRealizado: t => { rotuloRealizado = () => t; },
   vista: (p, t) => { anim = null; camera.position.set(...p); controls.target.set(...t); controls.update(); },
   quadro: (sub = '') => new Promise(r => { posRender = () => { posRender = null; const c = Object.assign(document.createElement('canvas'), { width: renderer.domElement.width, height: renderer.domElement.height }); if (sub) desenharQuadro(c.getContext('2d'), c.width, c.height, sub); else c.getContext('2d').drawImage(renderer.domElement, 0, 0); r(c.toDataURL('image/jpeg', .9)); }; }) };   // acesso por código (ex.: TECON3D.selecionar('EST 10-C'))
