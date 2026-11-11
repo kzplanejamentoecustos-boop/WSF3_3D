@@ -320,6 +320,13 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.maxPolarAngle = Math.PI * 0.62;
 controls.maxDistance = 1800;
+controls.minDistance = 6;   // o zoom para antes de chegar ao ponto de mira (senão a câmera entra na laje/aterro e a tela fica só com a cor de fundo)
+function limitarVista() {   // chamado antes de cada quadro
+  const t = controls.target;   // o ponto de mira não sai da área do modelo (arrastar com o botão direito)
+  t.set(Math.max(-1600, Math.min(1600, t.x)), Math.max(-45, Math.min(60, t.y)), Math.max(-1600, Math.min(1600, t.z)));
+  const d = camera.position.distanceTo(t);   // a neblina acompanha o zoom: o que está no centro da tela nunca some na neblina
+  scene.fog.near = Math.max(900, d * 1.15); scene.fog.far = Math.max(2200, d * 2.6);
+}
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x8c8f84, 1.0));
 const sol = new THREE.DirectionalLight(0xffffff, 1.7);
@@ -1863,7 +1870,7 @@ function selecionar(id, voar = false) {
 let anim = null;
 function animar(posFim, alvoFim, ms = 900) {
   const p0 = camera.position.clone(), t0 = controls.target.clone(), ini = performance.now();
-  anim = now => { let k = Math.min(1, (now - ini) / ms); k = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+  anim = now => { let k = Math.max(0, Math.min(1, (now - ini) / ms));   // nunca negativo (quadro com carimbo anterior ao clique) k = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
     camera.position.lerpVectors(p0, posFim, k); controls.target.lerpVectors(t0, alvoFim, k); if (k >= 1) anim = null; };
 }
 function voarPara(b) {
@@ -2086,7 +2093,7 @@ aplicarCores();
 let posRender = null;   // gravação de vídeo: copia o quadro logo após o render (o buffer do WebGL ainda está válido)
 renderer.setAnimationLoop(now => {
   if (anim) anim(now);
-  controls.update(); atualizarBussola();
+  limitarVista(); controls.update(); atualizarBussola();
   renderer.render(scene, camera); labelR.render(scene, camera);
   if (posRender) posRender();
 });
@@ -2195,7 +2202,7 @@ async function criarGravadorMP4(W, H, fps = 30) {
         if (erro) throw erro;
         const f = new VideoFrame(canvas, { timestamp: Math.round(n * dur), duration: Math.round(dur) });
         ve.encode(f, { keyFrame: n % (fps * 2) === 0 }); f.close(); n++;
-        while (ve.encodeQueueSize > 6) await espera(4);
+        while (ve.encodeQueueSize > 6) await new Promise(r => ve.addEventListener('dequeue', r, { once: true }));   // sem timer: não trava com a aba em segundo plano
       }
     },
     async fechar() {
@@ -2220,7 +2227,8 @@ async function criarGravadorMP4(W, H, fps = 30) {
     get segundos() { return n / fps; }
   };
 }
-const capturar = desenho => new Promise(r => { posRender = () => { posRender = null; desenho(); r(); }; });   // roda logo após o próximo render
+// renderiza o quadro na hora (sem esperar o laço de animação, que o navegador pausa quando a aba fica em segundo plano)
+const capturar = async desenho => { limitarVista(); controls.update(); renderer.render(scene, camera); desenho(); };
 function baixarVideo(blob, nome) {
   const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: nome });
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
@@ -2328,7 +2336,7 @@ $('#videoComp').onclick = () => gravarComparativo();
 $('#videoPlan').onclick = () => gravarVideo('plan');
 $('#videoReal').onclick = () => gravarVideo('real');
 
-window.TECON3D = { gravarVideo, gravarComparativo, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
+window.TECON3D = { gravarVideo, gravarComparativo, camera: () => ({ pos: camera.position.toArray().map(v => +v.toFixed(2)), alvo: controls.target.toArray().map(v => +v.toFixed(2)), dist: +camera.position.distanceTo(controls.target).toFixed(2) }), desenhar: () => { limitarVista(); controls.update(); renderer.render(scene, camera); }, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
   rotuloRealizado: t => { rotuloRealizado = () => t; },
   vista: (p, t) => { anim = null; camera.position.set(...p); controls.target.set(...t); controls.update(); },
   quadro: (sub = '') => new Promise(r => { posRender = () => { posRender = null; const c = Object.assign(document.createElement('canvas'), { width: renderer.domElement.width, height: renderer.domElement.height }); if (sub) desenharQuadro(c.getContext('2d'), c.width, c.height, sub); else c.getContext('2d').drawImage(renderer.domElement, 0, 0); r(c.toDataURL('image/jpeg', .9)); }; }) };   // acesso por código (ex.: TECON3D.selecionar('EST 10-C'))
