@@ -189,6 +189,12 @@ textarea{min-height:64px;resize:vertical}
         <button class="btn" id="videoReal" title="Animação semana a semana pelo realizado: P6 real + registros de campo">🎬 Realizado</button>
         <button class="btn pri" id="videoComp" title="Tela dividida: previsto à esquerda, realizado à direita, na mesma data">🎬 Previsto × Realizado</button>
       </div>
+      <label class="f">Programação (relatório com imagens + Excel)</label>
+      <div class="linha-opc" style="margin-top:0"><span>Início (segunda)</span><input type="date" id="progIni" style="flex:1"></div>
+      <div class="btns">
+        <button class="btn" id="progSemanal" title="Programação semanal: o que o P6 prevê executar na semana que começa na data acima, mais o que está atrasado pelo campo. Abre o relatório (imprimir / salvar PDF) e o Excel.">📋 Semanal</button>
+        <button class="btn pri" id="progSix" title="Six Week: as próximas 6 semanas a partir da data acima, cada semana com uma cor, mais o que está atrasado pelo campo. Abre o relatório (imprimir / salvar PDF) e o Excel.">📋 Six Week</button>
+      </div>
     </div>
     <div class="sec">
       <h3>Camadas</h3>
@@ -2377,7 +2383,197 @@ $('#videoComp').onclick = () => gravarComparativo();
 $('#videoPlan').onclick = () => gravarVideo('plan');
 $('#videoReal').onclick = () => gravarVideo('real');
 
-window.TECON3D = { gravarVideo, gravarComparativo, roteiro: (foco = focoVideo()) => (criarCameraVideo(foco)?.tomadas || []).map(c => ({ data: new Date(c.t).toISOString().slice(0, 10), alvo: c.alvo.toArray().map(Math.round), dist: Math.round(c.dist), giro: Math.round(c.az * 180 / Math.PI), incl: c.incl })), camera: () => ({ pos: camera.position.toArray().map(v => +v.toFixed(2)), alvo: controls.target.toArray().map(v => +v.toFixed(2)), dist: +camera.position.distanceTo(controls.target).toFixed(2) }), desenhar: () => { limitarVista(); controls.update(); renderer.render(scene, camera); }, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
+// ---------- programação: Six Week (6 semanas) e semanal ----------
+// Entra na janela toda atividade do P6 (datas do planejamento atual) com execução prevista entre o início e o fim da janela e
+// ainda não concluída (P6 com fim real / 100% ou todos os elementos "concluído" no campo). Com registros de campo na base,
+// entra também o que devia ter terminado antes da janela e o campo não marcou como concluído (atrasada).
+const COR_PROG = { atr: 0xdc2626, sem: [0xf97316, 0xeab308, 0x65a30d, 0x0d9488, 0x2563eb, 0x7c3aed], feito: 0xc9d1d9 };
+const hex = c => '#' + c.toString(16).padStart(6, '0');
+const DIAS_SEM = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+const dd = d => d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+function progIniPadrao() {   // próxima segunda-feira a partir da data do cronograma (ou ela mesma, se for segunda)
+  const d = new Date(cronoD); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + (8 - d.getDay()) % 7); return d;
+}
+function montarProgramacao(S, n) {
+  const E = new Date(+S + n * 7 * DIA), SEM = 7 * DIA, temCampo = ultimoCampo() > 0;
+  const per = n === 1 ? DIAS_SEM.map((r, i) => ({ r, a: new Date(+S + i * DIA), b: new Date(+S + (i + 1) * DIA) }))
+    : Array.from({ length: n }, (_, i) => ({ r: `S${i + 1}`, a: new Date(+S + i * SEM), b: new Date(+S + (i + 1) * SEM) }));
+  const tarefa = new Map(CRONO.tasks.map(t => [t.c, t])), ativ = new Map();
+  // zonas do aterro: o campo registra pelos quadrados da malha que ficam sobre a zona (todos concluídos = zona concluída)
+  const celsZona = new Map();
+  for (const o of objetos.values()) if (o.tipo === 'aterro') { const c = new Set(); (o.meshes || []).forEach(m => m.userData.cel && c.add('AT ' + m.userData.cel)); if (c.size) celsZona.set(o.id, [...c]); }
+  const stCampo = id => {
+    const z = celsZona.get(id), st0 = controle[id]?.status; if (!z || (st0 && st0 !== 'nao')) return st0;
+    const st = z.map(c => controle[c]?.status).filter(x => x && x !== 'nao'); if (!st.length) return null;
+    return st.length === z.length && st.every(x => x === 'ok') ? 'ok' : st.includes('par') ? 'par' : 'and';
+  };
+  for (const [id, ps] of porElem) for (const s of ps) {
+    if (s.e === 'prova' || !s.ps || !s.pe) continue;
+    let a = ativ.get(s.c);
+    if (!a) ativ.set(s.c, a = { c: s.c, n: s.n, w: tarefa.get(s.c)?.w || '', ps: s.ps, pe: s.pe, as: s.as, ae: s.ae, p: s.p || 0, ids: new Set() });
+    a.ids.add(s.e === 'desm' ? id + '#desm' : id);   // desmobilização do canteiro: registro de campo próprio
+  }
+  const linhas = [], codSem = new Map();
+  for (const a of ativ.values()) {
+    const cnt = { ok: 0, and: 0, par: 0 }; for (const id of a.ids) { const st = stCampo(id); if (st in cnt) cnt[st]++; }
+    if (a.ae || a.p >= 100 || cnt.ok === a.ids.size) continue;   // concluída no P6 ou no campo
+    let sem;
+    if (a.ps < E && a.pe >= S) sem = a.ps < S ? 0 : Math.floor((a.ps - S) / SEM);
+    else if (a.pe < S && temCampo) sem = -1; else continue;
+    const sit = sem < 0 ? 'Atrasada' : (a.as || cnt.and || cnt.par || a.ps < S) ? 'Em andamento' : 'A iniciar';
+    const campoTxt = [cnt.ok && `${cnt.ok} concl.`, cnt.and && `${cnt.and} em and.`, cnt.par && `${cnt.par} paralis.`].filter(Boolean).join(' · ');
+    const marcas = per.map(q => sem < 0 ? q === per[0] : a.ps < q.b && a.pe >= q.a);   // atrasada: marcada no 1º período (recuperar)
+    linhas.push({ ...a, sem, sit: sit + (cnt.par ? ' (paralisada no campo)' : ''), campoTxt, nElem: a.ids.size, marcas });
+    codSem.set(a.c, sem);
+  }
+  linhas.sort((x, y) => x.sem - y.sem || x.ps - y.ps || x.c.localeCompare(y.c));
+  // categoria de cada elemento no 3D: semana da 1ª atividade na janela (-1 = atrasada), 'feito' ou oculto
+  const elem = new Map();
+  for (const [id, ps] of porElem) {
+    const ss = ps.filter(s => codSem.has(s.c)).map(s => codSem.get(s.c));
+    if (ss.length) { elem.set(id, Math.min(...ss)); continue; }
+    if (ps.every(s => s.e === 'prova' || s.ae || s.p >= 100 || (s.pe && s.pe < S)) || stCampo(id) === 'ok') elem.set(id, 'feito');
+  }
+  const cel = new Map();   // quadrados da malha do aterro: data prevista do quadrado (fim − 30 dias → fim)
+  for (const o of objetos.values()) if (o.tipo === 'celula' && o.prevFim) {
+    const fim = +o.prevFim, ini = fim - 30 * DIA, st = controle[o.id]?.status;
+    if (st === 'ok') continue;
+    if (ini < E && fim >= S) cel.set(o.id, ini < S ? 0 : Math.floor((ini - S) / SEM));
+    else if (fim < S && temCampo) cel.set(o.id, -1);
+  }
+  return { S, E, n, per, linhas, elem, cel, temCampo, stCampo };
+}
+const corSem = s => s < 0 ? COR_PROG.atr : COR_PROG.sem[Math.min(s, 5)];
+const rotSem = (P, s) => s < 0 ? 'Atrasada' : P.n === 1 ? 'Semana' : `S${s + 1}`;
+async function imagensProgramacao(P) {
+  if (modoCor !== 'crono') document.querySelector('#modoCor button[data-m="crono"]').click();
+  const salvo = { modo: cronoModo, d: cronoD, so: $('#cronoSoExec').checked, pos: camera.position.clone(), alvo: controls.target.clone() };
+  if (cronoPlay) $('#cronoPlay').onclick();
+  const W = 1600, H = 900, imgs = [];
+  try {
+    cronoModo = 'plan'; $('#cronoSoExec').checked = true; cronoD = new Date(P.S); aplicarCores();   // situação prevista no início da janela
+    for (const o of objetos.values()) {   // pinta a janela por semana; concluído em cinza; o que vem depois fica oculto
+      if (o.tipo === 'celula') {
+        const s = P.cel.get(o.id), mt = o.meshes[0].material; mt.visible = s !== undefined;
+        if (s !== undefined) { mt.color.setHex(corSem(s)); mt.opacity = .8; }
+        continue;
+      }
+      if (!porElem.has(o.id) || ['aterro', 'canteiro', 'quadra', 'ponto'].includes(o.tipo)) continue;
+      const s = P.elem.get(o.id);
+      for (const m of o.meshes || []) {
+        m.visible = s !== undefined; if (s === undefined) continue;
+        if (o.tipo === 'edif') m.scale.y = 1;
+        if (m.material.userData.base !== undefined) { m.material.color.setHex(s === 'feito' ? COR_PROG.feito : corSem(s)); m.material.emissive.setHex(0); }
+      }
+    }
+    tamFixo = [W, H]; redimensionar();
+    const c2 = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = c2.getContext('2d');
+    const vista = (alvo, dist, az, incl) => { anim = null; const hz = dist * Math.cos(incl); camera.position.set(alvo.x + hz * Math.sin(az), Math.max(alvo.y + dist * Math.sin(incl), 30), alvo.z + hz * Math.cos(az)); controls.target.copy(alvo); controls.update(); };
+    const todos = enquadrar([...itensRoteiro(FOCO_TIPOS.fund), ...itensRoteiro(['celula']), ...itensRoteiro(['canteiro'])], .95);
+    const pts = [...P.elem].filter(([id, s]) => s !== 'feito' && objetos.get(id) && objetos.get(id).tipo !== 'canteiro').map(([id]) => centroObj(objetos.get(id)))
+      .concat([...P.cel.keys()].map(id => centroObj(objetos.get(id)))).filter(Boolean);
+    const fr = enquadrar(pts, .9), GR = Math.PI / 180, vistas = [];
+    if (todos) vistas.push(['Vista geral', () => vista(todos.c, Math.max(160, todos.r * 2.1), -40 * GR, .62)]);
+    if (fr) vistas.push(['Frentes da janela', () => vista(fr.c, Math.min(Math.max(70, fr.r * 2.6), todos ? Math.max(160, todos.r * 2.1) : 1e9), -40 * GR, .66)]);
+    vistas.push(['Vista atual da câmera', () => { anim = null; camera.position.copy(salvo.pos); controls.target.copy(salvo.alvo); controls.update(); }]);
+    const tit = P.n === 1 ? 'Programação semanal' : 'Six Week (lookahead 6 semanas)', faixa = `${fmtD(P.S)} a ${fmtD(new Date(+P.E - DIA))}`;
+    for (const [nome, pos] of vistas) {
+      pos(); limitarVista(); controls.update(); renderer.render(scene, camera);
+      g.drawImage(renderer.domElement, 0, 0, W, H);
+      g.fillStyle = 'rgba(30,58,95,.92)'; g.fillRect(0, 0, W, 70);
+      g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'left'; g.font = '700 26px Segoe UI, Arial'; g.fillText(`TECON Salvador · ${tit}`, 22, 26);
+      g.font = '18px Segoe UI, Arial'; g.globalAlpha = .85; g.fillText(`${nome} · situação prevista em ${fmtD(P.S)} + atividades da janela`, 22, 53); g.globalAlpha = 1;
+      g.textAlign = 'right'; g.font = '700 26px Segoe UI, Arial'; g.fillText(faixa, W - 22, 35);
+      const leg = [...(P.temCampo ? [[COR_PROG.atr, 'Atrasada (campo)']] : []), ...(P.n === 1 ? [[COR_PROG.sem[0], 'Na semana']] : P.per.map((q, i) => [COR_PROG.sem[i], `${q.r} · ${dd(q.a)}–${dd(new Date(+q.b - DIA))}`])), [COR_PROG.feito, 'Concluído / previsto concluído']];
+      const lh = 28, bw = 330, bh = leg.length * lh + 16, bx = 18, by = H - bh - 18;
+      g.fillStyle = 'rgba(255,255,255,.93)'; g.beginPath(); g.roundRect(bx, by, bw, bh, 10); g.fill();
+      g.font = '17px Segoe UI, Arial'; g.textAlign = 'left';
+      leg.forEach(([c, t], i) => { const y = by + 8 + i * lh + lh / 2; g.fillStyle = hex(c); g.fillRect(bx + 14, y - 8, 22, 16); g.fillStyle = '#1e293b'; g.fillText(t, bx + 46, y); });
+      imgs.push({ nome, url: c2.toDataURL('image/jpeg', .9) });
+    }
+  } finally {
+    tamFixo = null; redimensionar();
+    cronoModo = salvo.modo; cronoD = salvo.d; $('#cronoSoExec').checked = salvo.so;
+    camera.position.copy(salvo.pos); controls.target.copy(salvo.alvo); controls.update(); aplicarCores();
+  }
+  return imgs;
+}
+const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
+async function excelProgramacao(P, tit) {
+  const X = await import(XLSX_URL), meio = d => d ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12) : '';
+  const cab = ['Semana', 'Código P6', 'Atividade', 'WBS', 'Início previsto', 'Fim previsto', '% P6', 'Situação', 'Nº elementos', 'Registros de campo', ...P.per.map(q => P.n === 1 ? `${q.r} ${dd(q.a)}` : `${q.r} (${dd(q.a)})`)];
+  const lin = P.linhas.map(a => [rotSem(P, a.sem), a.c, a.n, a.w, meio(a.ps), meio(a.pe), a.p / 100, a.sit, a.nElem, a.campoTxt, ...a.marcas.map(m => m ? '■' : '')]);
+  const ws = X.utils.aoa_to_sheet([cab, ...lin], { dateNF: 'dd/mm/yyyy', cellDates: true });
+  ws['!cols'] = [8, 12, 60, 50, 12, 12, 7, 26, 11, 24, ...P.per.map(() => 11)].map(wch => ({ wch }));
+  ws['!autofilter'] = { ref: X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lin.length, c: cab.length - 1 } }) };
+  for (let r = 1; r <= lin.length; r++) { const c = ws[X.utils.encode_cell({ r, c: 6 })]; if (c) c.z = '0%'; }
+  const nomes = id => { const o = objetos.get(id.replace('#desm', '')); return o ? (o.nome || o.id) + (id.endsWith('#desm') ? ' (desmobilização)' : '') : id; };
+  const el = [['Semana', 'Elemento (id)', 'Nome', 'Tipo', 'Atividades P6 na janela', 'Status de campo']];
+  for (const a of P.linhas) for (const id of a.ids) el.push([rotSem(P, a.sem), id, nomes(id), objetos.get(id.replace('#desm', ''))?.tipo || '', a.c, NOME_STATUS[P.stCampo(id) || 'nao'] || '']);
+  for (const [id, s] of P.cel) el.push([rotSem(P, s), id, objetos.get(id)?.nome || id, 'celula (malha do aterro)', '— (data prevista do quadrado)', NOME_STATUS[controle[id]?.status || 'nao'] || '']);
+  const ws2 = X.utils.aoa_to_sheet(el); ws2['!cols'] = [8, 16, 40, 22, 34, 18].map(wch => ({ wch }));
+  const par = [['Relatório', tit], ['Janela', `${fmtD(P.S)} a ${fmtD(new Date(+P.E - DIA))}`], ['Cronograma', `${CRONO.arquivo} · data dos dados ${fmtD(dataP6(CRONO.dataDados))}`],
+    ['Base de campo', `${lerLS(CHAVE_BASE + '-nome') || 'local (este navegador)'} · ${Object.keys(controle).length} registros${P.temCampo ? ` · último em ${fmtD(new Date(ultimoCampo()))}` : ' (sem registros: atrasadas não calculadas)'}`],
+    ['Critério', 'Atividades ligadas ao modelo 3D com execução prevista (datas do planejamento atual do P6) na janela e não concluídas; atrasada = fim previsto antes da janela sem conclusão no P6 nem no campo.'],
+    ['Gerado em', new Date().toLocaleString('pt-BR')]];
+  const ws3 = X.utils.aoa_to_sheet(par); ws3['!cols'] = [{ wch: 16 }, { wch: 120 }];
+  const wb = X.utils.book_new();
+  X.utils.book_append_sheet(wb, ws, 'Programação'); X.utils.book_append_sheet(wb, ws2, 'Elementos'); X.utils.book_append_sheet(wb, ws3, 'Parâmetros');
+  return new Blob([X.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+function htmlProgramacao(P, tit, imgs, xlsxUrl, nomeArq) {
+  const faixa = `${fmtD(P.S)} a ${fmtD(new Date(+P.E - DIA))}`, porSem = new Map();
+  P.linhas.forEach(a => porSem.set(a.sem, (porSem.get(a.sem) || 0) + 1));
+  const kp = [...porSem].sort((a, b) => a[0] - b[0]).map(([s, q]) => `<div class="k"><i style="background:${hex(corSem(s))}"></i><b>${q}</b><span>${s < 0 ? 'atrasadas' : P.n === 1 ? 'na semana' : `${P.per[s].r} · ${dd(P.per[s].a)}`}</span></div>`).join('');
+  const lin = P.linhas.map(a => `<tr><td><span class="sw" style="background:${hex(corSem(a.sem))}"></span>${rotSem(P, a.sem)}</td><td>${esc(a.c)}</td><td>${esc(a.n)}<div class="w">${esc(a.w)}</div></td><td>${fmtD(a.ps)}</td><td>${fmtD(a.pe)}</td><td class="n">${fmt(a.p)}%</td><td>${esc(a.sit)}</td><td class="n">${a.nElem}</td><td>${esc(a.campoTxt)}</td>${a.marcas.map(m => `<td class="g">${m ? `<i style="background:${hex(corSem(a.sem))}"></i>` : ''}</td>`).join('')}</tr>`).join('');
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(tit)} ${faixa}</title><style>
+  @page{size:A4 landscape;margin:10mm} body{font:12px Segoe UI,Arial,sans-serif;color:#1e293b;margin:0;background:#f1f5f9}
+  header{background:#1e3a5f;color:#fff;padding:14px 22px;display:flex;justify-content:space-between;align-items:center} h1{font-size:20px;margin:0} header p{margin:3px 0 0;opacity:.85}
+  .barra{padding:10px 22px;display:flex;gap:8px;flex-wrap:wrap} .barra a,.barra button{background:#1e3a5f;color:#fff;border:0;border-radius:6px;padding:8px 14px;font:600 13px Segoe UI,Arial;cursor:pointer;text-decoration:none}
+  main{padding:0 22px 22px} .kp{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 14px} .k{background:#fff;border-radius:8px;padding:8px 12px;display:flex;align-items:center;gap:8px;box-shadow:0 1px 2px #0001} .k i{width:12px;height:12px;border-radius:3px} .k b{font-size:18px}
+  figure{margin:0 0 14px;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 2px #0001;break-inside:avoid} figure img{width:100%;display:block} figcaption{padding:6px 10px;color:#475569}
+  table{width:100%;border-collapse:collapse;background:#fff;font-size:11px} th{background:#1e3a5f;color:#fff;text-align:left;padding:5px;position:sticky;top:0} td{padding:4px 5px;border-bottom:1px solid #e2e8f0;vertical-align:top}
+  td.n{text-align:right} td.g{text-align:center;width:34px} td.g i{display:block;height:12px;border-radius:2px} .w{color:#64748b;font-size:10px} .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+  .nota{color:#475569;font-size:11px;margin:10px 0} .tag{background:#fef3c7;border-radius:4px;padding:0 4px;font-size:10px}
+  @media print{body{background:#fff}.barra{display:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}th,td.g i,.sw,.k i{-webkit-print-color-adjust:exact;print-color-adjust:exact}figure{page-break-after:always;box-shadow:none}thead{display:table-header-group}tr{break-inside:avoid}}
+  </style></head><body><header><div><h1>TECON Salvador · ${esc(tit)}</h1><p>${esc(CRONO.arquivo)} · data dos dados ${fmtD(dataP6(CRONO.dataDados))} · base de campo: ${esc(lerLS(CHAVE_BASE + '-nome') || 'local')}</p></div><h1>${faixa}</h1></header>
+  <div class="barra"><button onclick="print()">🖨 Imprimir / salvar PDF</button>${xlsxUrl ? `<a href="${xlsxUrl}" download="${nomeArq}.xlsx">⬇ Excel (.xlsx)</a>` : ''}${imgs.map((m, i) => `<a href="${m.url}" download="${nomeArq}-imagem-${i + 1}.jpg">⬇ ${esc(m.nome)}</a>`).join('')}</div>
+  <main><div class="kp"><div class="k"><b>${P.linhas.length}</b><span>atividades P6 na programação</span></div>${kp}</div>
+  ${imgs.map(m => `<figure><img src="${m.url}" alt="${esc(m.nome)}"><figcaption>${esc(m.nome)} — cor = semana em que a atividade entra na janela; cinza = concluído ou previsto concluído antes de ${fmtD(P.S)}; o que vem depois da janela fica oculto.</figcaption></figure>`).join('')}
+  <table><thead><tr><th>Semana</th><th>Código</th><th>Atividade / WBS</th><th>Início prev.</th><th>Fim prev.</th><th>% P6</th><th>Situação</th><th>Elem.</th><th>Campo</th>${P.per.map(q => `<th>${q.r}<br>${dd(q.a)}</th>`).join('')}</tr></thead><tbody>${lin || `<tr><td colspan="${9 + P.per.length}">Nenhuma atividade ligada ao modelo na janela.</td></tr>`}</tbody></table>
+  <p class="nota"><span class="tag">Critério</span> atividades do P6 ligadas ao modelo 3D, com execução prevista (datas do planejamento atual) na janela e não concluídas (sem fim real / 100% no P6 e sem "concluído" em todos os elementos no campo). ${P.temCampo ? `Atrasada = fim previsto antes de ${fmtD(P.S)} sem conclusão no P6 nem no campo (último registro de campo em ${fmtD(new Date(ultimoCampo()))}).` : 'A base de campo não tem registros: as atrasadas não foram calculadas.'} Quadrados da malha do aterro aparecem nas imagens pela data prevista do quadrado (fim − 30 dias). Canteiro de obras: só na tabela. Gerado em ${new Date().toLocaleString('pt-BR')}.</p></main></body></html>`;
+}
+let gerandoProg = false;
+function baixarArquivo(blob, nome) {
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: nome });
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+async function gerarProgramacao(n) {
+  if (gerandoProg || gravando) return;
+  if (!porElem.size) configurarCrono();
+  const v = $('#progIni').value, S = v ? new Date(v + 'T00:00') : progIniPadrao();
+  if (v && S.getDay() !== 1) toast('Atenção: a data de início não é uma segunda-feira');
+  const tit = n === 1 ? 'Programação semanal' : 'Six Week — lookahead de 6 semanas', nomeArq = `TECON-Salvador-${n === 1 ? 'programacao-semanal' : 'six-week'}-${S.toISOString().slice(0, 10)}`;
+  const w = window.open('', '_blank');   // abre já no clique (depois o navegador bloquearia a janela)
+  if (w) w.document.write('<p style="font:16px Segoe UI,Arial;padding:24px">Gerando a programação…</p>');
+  gerandoProg = true; toast('Gerando a programação…');
+  try {
+    const P = montarProgramacao(S, n), imgs = await imagensProgramacao(P);
+    let xlsx = null; try { xlsx = await excelProgramacao(P, tit); } catch (e) { console.error(e); toast('Excel indisponível (sem internet?): o relatório sai sem ele'); }
+    const xu = xlsx ? URL.createObjectURL(xlsx) : null, html = htmlProgramacao(P, tit, imgs, w && !w.closed ? xu : null, nomeArq);   // relatório baixado como arquivo: o Excel vai à parte
+    if (xlsx) baixarArquivo(xlsx, nomeArq + '.xlsx');
+    if (w && !w.closed) { w.document.open(); w.document.write(html); w.document.close(); }
+    else baixarArquivo(new Blob([html], { type: 'text/html' }), nomeArq + '.html');   // janela bloqueada: baixa o relatório
+    toast(`${tit}: ${P.linhas.length} atividades`);
+    return P;
+  } catch (e) { console.error(e); toast('Falha ao gerar a programação: ' + e.message); if (w) w.close(); }
+  finally { gerandoProg = false; }
+}
+$('#progIni').value = new Date(+progIniPadrao() + 12 * 36e5).toISOString().slice(0, 10);
+$('#progSemanal').onclick = () => gerarProgramacao(1);
+$('#progSix').onclick = () => gerarProgramacao(6);
+
+window.TECON3D = { gravarVideo, gravarComparativo, gerarProgramacao, montarProgramacao, roteiro: (foco = focoVideo()) => (criarCameraVideo(foco)?.tomadas || []).map(c => ({ data: new Date(c.t).toISOString().slice(0, 10), alvo: c.alvo.toArray().map(Math.round), dist: Math.round(c.dist), giro: Math.round(c.az * 180 / Math.PI), incl: c.incl })), camera: () => ({ pos: camera.position.toArray().map(v => +v.toFixed(2)), alvo: controls.target.toArray().map(v => +v.toFixed(2)), dist: +camera.position.distanceTo(controls.target).toFixed(2) }), desenhar: () => { limitarVista(); controls.update(); renderer.render(scene, camera); }, selecionar: id => selecionar(id, true), ids: () => [...objetos.keys()], objeto: id => objetos.get(id), frac: id => fracCrono(id), estado: id => estadoCrono(id, cronoD, cronoModo), passos: id => porElem.get(id), faixa: () => [cronoMin, cronoMax],
   rotuloRealizado: t => { rotuloRealizado = () => t; },
   vista: (p, t) => { anim = null; camera.position.set(...p); controls.target.set(...t); controls.update(); },
   quadro: (sub = '') => new Promise(r => { posRender = () => { posRender = null; const c = Object.assign(document.createElement('canvas'), { width: renderer.domElement.width, height: renderer.domElement.height }); if (sub) desenharQuadro(c.getContext('2d'), c.width, c.height, sub); else c.getContext('2d').drawImage(renderer.domElement, 0, 0); r(c.toDataURL('image/jpeg', .9)); }; }) };   // acesso por código (ex.: TECON3D.selecionar('EST 10-C'))
