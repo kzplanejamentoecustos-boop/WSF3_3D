@@ -2395,7 +2395,10 @@ function progIniPadrao() {   // próxima segunda-feira a partir da data do crono
   const d = new Date(cronoD); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + (8 - d.getDay()) % 7); return d;
 }
 function montarProgramacao(S, n) {
-  const E = new Date(+S + n * 7 * DIA), SEM = 7 * DIA, temCampo = ultimoCampo() > 0;
+  const E = new Date(+S + n * 7 * DIA), SEM = 7 * DIA;
+  // registros de campo valem a partir da data deles (igual ao modo Cronograma): só conta o que foi registrado até o fim da janela
+  let ultCampo = 0; for (const c of Object.values(controle)) if (c && c.status && c.status !== 'nao') { const d = dataCampo(c); if (d && d < E && +d > ultCampo) ultCampo = +d; }
+  const temCampo = ultCampo > 0, stData = id => campo(id, new Date(+E - 1));
   const per = n === 1 ? DIAS_SEM.map((r, i) => ({ r, a: new Date(+S + i * DIA), b: new Date(+S + (i + 1) * DIA) }))
     : Array.from({ length: n }, (_, i) => ({ r: `S${i + 1}`, a: new Date(+S + i * SEM), b: new Date(+S + (i + 1) * SEM) }));
   const tarefa = new Map(CRONO.tasks.map(t => [t.c, t])), ativ = new Map();
@@ -2403,8 +2406,8 @@ function montarProgramacao(S, n) {
   const celsZona = new Map();
   for (const o of objetos.values()) if (o.tipo === 'aterro') { const c = new Set(); (o.meshes || []).forEach(m => m.userData.cel && c.add('AT ' + m.userData.cel)); if (c.size) celsZona.set(o.id, [...c]); }
   const stCampo = id => {
-    const z = celsZona.get(id), st0 = controle[id]?.status; if (!z || (st0 && st0 !== 'nao')) return st0;
-    const st = z.map(c => controle[c]?.status).filter(x => x && x !== 'nao'); if (!st.length) return null;
+    const z = celsZona.get(id), st0 = stData(id); if (!z || st0) return st0;
+    const st = z.map(stData).filter(Boolean); if (!st.length) return null;
     return st.length === z.length && st.every(x => x === 'ok') ? 'ok' : st.includes('par') ? 'par' : 'and';
   };
   for (const [id, ps] of porElem) for (const s of ps) {
@@ -2436,12 +2439,12 @@ function montarProgramacao(S, n) {
   }
   const cel = new Map();   // quadrados da malha do aterro: data prevista do quadrado (fim − 30 dias → fim)
   for (const o of objetos.values()) if (o.tipo === 'celula' && o.prevFim) {
-    const fim = +o.prevFim, ini = fim - 30 * DIA, st = controle[o.id]?.status;
+    const fim = +o.prevFim, ini = fim - 30 * DIA, st = stData(o.id);
     if (st === 'ok') continue;
     if (ini < E && fim >= S) cel.set(o.id, ini < S ? 0 : Math.floor((ini - S) / SEM));
     else if (fim < S && temCampo) cel.set(o.id, -1);
   }
-  return { S, E, n, per, linhas, elem, cel, temCampo, stCampo };
+  return { S, E, n, per, linhas, elem, cel, temCampo, ultCampo, stCampo };
 }
 const corSem = s => s < 0 ? COR_PROG.atr : COR_PROG.sem[Math.min(s, 5)];
 const rotSem = (P, s) => s < 0 ? 'Atrasada' : P.n === 1 ? 'Semana' : `S${s + 1}`;
@@ -2513,7 +2516,7 @@ async function excelProgramacao(P, tit) {
   for (const [id, s] of P.cel) el.push([rotSem(P, s), id, objetos.get(id)?.nome || id, 'celula (malha do aterro)', '— (data prevista do quadrado)', NOME_STATUS[controle[id]?.status || 'nao'] || '']);
   const ws2 = X.utils.aoa_to_sheet(el); ws2['!cols'] = [8, 16, 40, 22, 34, 18].map(wch => ({ wch }));
   const par = [['Relatório', tit], ['Janela', `${fmtD(P.S)} a ${fmtD(new Date(+P.E - DIA))}`], ['Cronograma', `${CRONO.arquivo} · data dos dados ${fmtD(dataP6(CRONO.dataDados))}`],
-    ['Base de campo', `${lerLS(CHAVE_BASE + '-nome') || 'local (este navegador)'} · ${Object.keys(controle).length} registros${P.temCampo ? ` · último em ${fmtD(new Date(ultimoCampo()))}` : ' (sem registros: atrasadas não calculadas)'}`],
+    ['Base de campo', `${lerLS(CHAVE_BASE + '-nome') || 'local (este navegador)'} · ${Object.keys(controle).length} registros${P.temCampo ? ` · último em ${fmtD(new Date(P.ultCampo))}` : ' (sem registros: atrasadas não calculadas)'}`],
     ['Critério', 'Atividades ligadas ao modelo 3D com execução prevista (datas do planejamento atual do P6) na janela e não concluídas; atrasada = fim previsto antes da janela sem conclusão no P6 nem no campo.'],
     ['Gerado em', new Date().toLocaleString('pt-BR')]];
   const ws3 = X.utils.aoa_to_sheet(par); ws3['!cols'] = [{ wch: 16 }, { wch: 120 }];
@@ -2541,7 +2544,7 @@ function htmlProgramacao(P, tit, imgs, xlsxUrl, nomeArq) {
   <main><div class="kp"><div class="k"><b>${P.linhas.length}</b><span>atividades P6 na programação</span></div>${kp}</div>
   ${imgs.map(m => `<figure><img src="${m.url}" alt="${esc(m.nome)}"><figcaption>${esc(m.nome)} — cor = semana em que a atividade entra na janela; cinza = concluído ou previsto concluído antes de ${fmtD(P.S)}; o que vem depois da janela fica oculto.</figcaption></figure>`).join('')}
   <table><thead><tr><th>Semana</th><th>Código</th><th>Atividade / WBS</th><th>Início prev.</th><th>Fim prev.</th><th>% P6</th><th>Situação</th><th>Elem.</th><th>Campo</th>${P.per.map(q => `<th>${q.r}<br>${dd(q.a)}</th>`).join('')}</tr></thead><tbody>${lin || `<tr><td colspan="${9 + P.per.length}">Nenhuma atividade ligada ao modelo na janela.</td></tr>`}</tbody></table>
-  <p class="nota"><span class="tag">Critério</span> atividades do P6 ligadas ao modelo 3D, com execução prevista (datas do planejamento atual) na janela e não concluídas (sem fim real / 100% no P6 e sem "concluído" em todos os elementos no campo). ${P.temCampo ? `Atrasada = fim previsto antes de ${fmtD(P.S)} sem conclusão no P6 nem no campo (último registro de campo em ${fmtD(new Date(ultimoCampo()))}).` : 'A base de campo não tem registros: as atrasadas não foram calculadas.'} Quadrados da malha do aterro aparecem nas imagens pela data prevista do quadrado (fim − 30 dias). Canteiro de obras: só na tabela. Gerado em ${new Date().toLocaleString('pt-BR')}.</p></main></body></html>`;
+  <p class="nota"><span class="tag">Critério</span> atividades do P6 ligadas ao modelo 3D, com execução prevista (datas do planejamento atual) na janela e não concluídas (sem fim real / 100% no P6 e sem "concluído" em todos os elementos no campo). ${P.temCampo ? `Atrasada = fim previsto antes de ${fmtD(P.S)} sem conclusão no P6 nem no campo (último registro de campo em ${fmtD(new Date(P.ultCampo))}).` : 'A base de campo não tem registros: as atrasadas não foram calculadas.'} Quadrados da malha do aterro aparecem nas imagens pela data prevista do quadrado (fim − 30 dias). Canteiro de obras: só na tabela. Gerado em ${new Date().toLocaleString('pt-BR')}.</p></main></body></html>`;
 }
 let gerandoProg = false;
 function baixarArquivo(blob, nome) {
