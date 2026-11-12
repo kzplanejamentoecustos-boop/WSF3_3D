@@ -83,6 +83,8 @@ textarea{min-height:64px;resize:vertical}
 .prog .l span:last-child{color:var(--tx2);font-variant-numeric:tabular-nums}
 .prog .barra{display:flex;height:7px;margin-top:4px}
 .prog .barra i{display:block;height:100%}
+#nomesEl{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:2}
+#nomesEl div{position:absolute;transform:translate(-50%,-100%);background:rgba(255,255,255,.92);color:#0f172a;border:1px solid #94a3b8;border-radius:3px;font:600 11px Segoe UI,Arial,sans-serif;padding:0 4px;white-space:nowrap}
 .lbl.eixo{background:#fff;color:var(--navy);border:1px solid var(--navy);font-weight:700;padding:0 5px}
 .linha-opc{display:flex;align-items:center;gap:8px;margin-top:8px}
 .linha-opc select{width:auto;flex:1;padding:4px 6px}
@@ -200,6 +202,10 @@ textarea{min-height:64px;resize:vertical}
       <h3>Camadas</h3>
       <div id="camadas"></div>
       <label class="chk" style="margin-top:6px"><input type="checkbox" id="lajeTransp">Laje transparente (ver fundação)</label>
+      <label class="chk" title="Mostra o nome (código) dos elementos visíveis na tela — estacas, capitéis, vigas, pré-lajes, blocos, prédios do canteiro… Aproxime a câmera para ver mais nomes; quando os nomes se sobrepõem, aparece só o do elemento mais próximo."><input type="checkbox" id="mostrarNomes">🏷 Mostrar nome dos elementos</label>
+      <div class="linha-opc" id="nomesFiltro" style="display:none"><span>Nomes de</span>
+        <select id="nomesTipo"><option value="">Todos</option><option value="estaca">Estacas</option><option value="bloco">Blocos</option><option value="capitel,viga,pm,cml">Superestrutura (capitéis, vigas, pré-lajes, CML)</option><option value="canteiro,edif,torre,estante,rtg">Canteiro, prédios e equipamentos</option></select>
+      </div>
       <div class="linha-opc"><span>Nível d'água</span>
         <select id="mare"><option value="0.20">Maré mín. (EL +0,20)</option><option value="2.40">Maré máx. (EL +2,40)</option><option value="">Oculto</option></select>
       </div>
@@ -2097,10 +2103,47 @@ redimensionar();
 aplicarCamadas();
 aplicarCores();
 let posRender = null;   // gravação de vídeo: copia o quadro logo após o render (o buffer do WebGL ainda está válido)
+// ---- nomes dos elementos (opção "Mostrar nome dos elementos"): só o nome, dos elementos visíveis, sem sobrepor ----
+const nomesEl = Object.assign(document.createElement('div'), { id: 'nomesEl' }); cenaEl.appendChild(nomesEl);
+const NOME_POR_NOME = ['canteiro', 'edif', 'torre', 'estante', 'rtg'], SEM_NOME = ['celula', 'aterro', 'piso', 'faixa', 'ponto', 'quadra'];
+const ancoraNome = new Map(), poolNomes = []; let nomesOn = false, nomesT = 0, nomesTipos = null;
+function ancora(o) {   // ponto acima do elemento onde o nome fica (calculado uma vez)
+  if (ancoraNome.has(o.id)) return ancoraNome.get(o.id);
+  const b = new THREE.Box3(); (o.meshes || []).forEach(m => { m.updateMatrixWorld(true); b.expandByObject(m); });
+  const a = b.isEmpty() ? null : new THREE.Vector3((b.min.x + b.max.x) / 2, b.max.y, (b.min.z + b.max.z) / 2); ancoraNome.set(o.id, a); return a;
+}
+const visivelNaCena = m => { for (let x = m; x; x = x.parent) if (!x.visible) return false; return true; };
+function atualizarNomes(forcar) {
+  const agora = performance.now(); if (!forcar && agora - nomesT < 15) return; nomesT = agora;
+  const W = cenaEl.clientWidth, H = cenaEl.clientHeight, v = new THREE.Vector3(), cand = [];
+  for (const o of objetos.values()) {
+    if (SEM_NOME.includes(o.tipo) || (nomesTipos && !nomesTipos.includes(o.tipo)) || !(o.meshes || []).some(visivelNaCena)) continue;
+    const a = ancora(o); if (!a) continue;
+    v.copy(a).project(camera); if (v.z > 1 || v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) continue;
+    cand.push({ o, x: (v.x + 1) / 2 * W, y: (1 - v.y) / 2 * H, d: camera.position.distanceToSquared(a) });
+  }
+  cand.sort((a, b) => a.d - b.d);
+  const ocup = [], usados = [];   // do mais próximo para o mais distante; pula o que sobrepõe um nome já colocado
+  for (const c of cand) {
+    if (usados.length >= 400) break;
+    const t = NOME_POR_NOME.includes(c.o.tipo) ? (c.o.nome || c.o.id) : c.o.id, w = t.length * 6.3 + 10, r = [c.x - w / 2, c.y - 17, c.x + w / 2, c.y];
+    if (ocup.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) continue;
+    ocup.push(r); usados.push([c, t]);
+  }
+  while (poolNomes.length < usados.length) poolNomes.push(nomesEl.appendChild(document.createElement('div')));
+  poolNomes.forEach((d, i) => {
+    const u = usados[i]; if (!u) { d.style.display = 'none'; return; }
+    d.style.display = ''; if (d.textContent !== u[1]) d.textContent = u[1]; d.style.left = u[0].x.toFixed(1) + 'px'; d.style.top = (u[0].y - 2).toFixed(1) + 'px';
+  });
+}
+$('#mostrarNomes').onchange = e => { nomesOn = e.target.checked; nomesEl.style.display = $('#nomesFiltro').style.display = nomesOn ? '' : 'none'; if (nomesOn) atualizarNomes(true); };
+$('#nomesTipo').onchange = e => { nomesTipos = e.target.value ? e.target.value.split(',') : null; atualizarNomes(true); };
+nomesEl.style.display = 'none';
 renderer.setAnimationLoop(now => {
   if (anim) anim(now);
   limitarVista(); controls.update(); atualizarBussola();
   renderer.render(scene, camera); labelR.render(scene, camera);
+  if (nomesOn) atualizarNomes();
   if (posRender) posRender();
 });
 
