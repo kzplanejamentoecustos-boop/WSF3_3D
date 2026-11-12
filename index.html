@@ -2619,7 +2619,14 @@ function htmlProgramacao(P, tit, imgs, xlsxUrl, nomeArq) {
   .sg{display:grid;grid-template-columns:62% 1fr;gap:12px;padding:10px 14px} .sg img{width:100%;border-radius:6px;display:block} .fr h4{margin:0 0 6px;font-size:13px;color:#1e3a5f} .fr ul{margin:0;padding-left:16px} .fr li{margin:0 0 4px}
   .semana table{border-top:1px solid #e2e8f0} .ns{display:inline-block;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;white-space:nowrap}
   .ns0{background:#fee2e2;color:#991b1b} .ns1{background:#dcfce7;color:#166534} .ns2{background:#e0e7ff;color:#3730a3} .ns3{background:#f1f5f9;color:#334155} .ns4{background:#fef3c7;color:#92400e}
-  @media print{.semana{break-before:page;box-shadow:none}.sh,.ns{-webkit-print-color-adjust:exact;print-color-adjust:exact}body{background:#fff}.barra{display:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}th,td.g i,.sw,.k i{-webkit-print-color-adjust:exact;print-color-adjust:exact}figure{page-break-after:always;box-shadow:none}thead{display:table-header-group}tr{break-inside:avoid}}
+  @media print{   /* A4 paisagem: área útil ~277 × 190 mm */
+    *{-webkit-print-color-adjust:exact;print-color-adjust:exact} body{background:#fff} .barra{display:none}
+    header{padding:8px 14px} header h1{font-size:17px} main{padding:0} .kp{margin:6px 0 8px} .k{box-shadow:none;border:1px solid #e2e8f0}
+    figure{break-inside:avoid;break-after:page;box-shadow:none;margin:0;text-align:center} figure img{width:auto;max-width:100%;max-height:150mm;margin:0 auto}
+    figcaption{padding:3px 6px;font-size:10px;text-align:left}
+    h2.secao{break-before:page;margin:0 0 4px} .semana{break-before:page;box-shadow:none;margin:0} .secao + .nota + .semana{break-before:auto}
+    .sh{padding:6px 10px} .sg{grid-template-columns:60% 1fr;padding:6px 0} .sg img{max-height:100mm;width:auto;max-width:100%;object-fit:contain}
+    table{font-size:10px} thead{display:table-header-group} tr{break-inside:avoid}}
   </style></head><body><header><div><h1>TECON Salvador · ${esc(tit)}</h1><p>${esc(CRONO.arquivo)} · data dos dados ${fmtD(dataP6(CRONO.dataDados))} · base de campo: ${esc(lerLS(CHAVE_BASE + '-nome') || 'local')}</p></div><h1>${faixa}</h1></header>
   <div class="barra"><button onclick="print()">🖨 Imprimir / salvar PDF</button>${xlsxUrl ? `<a href="${xlsxUrl}" download="${nomeArq}.xlsx">⬇ Excel (.xlsx)</a>` : ''}${imgs.map((m, i) => `<a href="${m.url}" download="${nomeArq}-imagem-${i + 1}.jpg">⬇ ${esc(m.sem === undefined ? m.nome : m.nome.split(' ')[0])}</a>`).join('')}</div>
   <main><div class="kp"><div class="k"><b>${P.linhas.length}</b><span>atividades P6 na programação</span></div>${kp}</div>
