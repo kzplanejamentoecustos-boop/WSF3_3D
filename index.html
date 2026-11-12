@@ -2462,11 +2462,18 @@ async function imagensProgramacao(P) {
   if (modoCor !== 'crono') document.querySelector('#modoCor button[data-m="crono"]').click();
   const salvo = { modo: cronoModo, d: cronoD, so: $('#cronoSoExec').checked, pos: camera.position.clone(), alvo: controls.target.clone() };
   if (cronoPlay) $('#cronoPlay').onclick();
-  const W = 1600, H = 900, imgs = [];
+  const W = 1600, H = 900, imgs = [], corOrig = new Map();   // cores originais dos materiais do canteiro (repostas no fim)
   try {
     cronoModo = 'plan'; $('#cronoSoExec').checked = true; cronoD = new Date(P.S); aplicarCores();   // situação prevista no início da janela
     const pintar = (corEl, corCel) => {   // cor de cada elemento / quadrado (null = oculto)
       for (const o of objetos.values()) {
+        if (o.tipo === 'canteiro' && porElem.has(o.id)) {   // canteiro (ex.: central de concreto): mostra inteiro, na cor da semana
+          const c = corEl(o.id), gs = [o.g3d, ...(o.partes || []).map(q => q.g)].filter(Boolean);
+          gs.forEach(gr => { gr.visible = c != null; if (c == null) return; gr.scale.y = 1;
+            gr.traverse(m => { if (m.isMesh) [].concat(m.material).forEach(mt => { if (!mt || !mt.color) return; if (!corOrig.has(mt)) corOrig.set(mt, mt.color.getHex()); mt.color.setHex(c); }); }); });
+          if (c == null && o.rot) o.rot.visible = false;
+          continue;
+        }
         if (o.tipo === 'celula') {
           const c = corCel(o.id), mt = o.meshes[0].material; mt.visible = c != null;
           if (c != null) { mt.color.setHex(c); mt.opacity = .8; }
@@ -2512,13 +2519,15 @@ async function imagensProgramacao(P) {
     for (const [nome, pos] of vistas) { pos(); imgs.push({ nome, url: foto(`TECON Salvador · ${tit}`, `${nome} · situação prevista em ${fmtD(P.S)} + atividades da janela`, faixa, legJ) }); }
     // uma imagem por semana (Six Week): o que se faz na semana em destaque, o que já foi feito em cinza, o que vem depois oculto
     if (P.n > 1) {
-      // mesma vista em todas as semanas (para comparar), enquadrando os elementos com atividade em alguma semana da janela
-      const ws = enquadrar([...P.elemSem.keys()].map(id => objetos.get(id)).filter(o => o && o.tipo !== 'canteiro').map(centroObj).filter(Boolean)
-        .concat([...P.cel.keys()].map(id => centroObj(objetos.get(id))).filter(Boolean)), .85);
-      if (ws) vista(ws.c, Math.min(Math.max(55, ws.r * 2.3), todos ? Math.max(160, todos.r * 2.1) : 1e9), -40 * GR, .7);
-      else if (fr) vistas[1][1](); else vistas[0][1]();
+      const dMax = todos ? Math.max(160, todos.r * 2.1) : 1e9;
       for (let k = 0; k < P.n; k++) {
         const q = P.per[k], ck = corSem(k);
+        // câmera enquadra o que se executa NESTA semana (elementos das atividades da semana + quadrados do aterro da semana)
+        const pk = [...P.elemSem].filter(([, w]) => w.k.has(k)).map(([id]) => objetos.get(id)).filter(Boolean).map(centroObj)
+          .concat([...P.celInt].filter(([id, [a, b]]) => P.cel.get(id) < 0 ? k === 0 : a < +q.b && b >= +q.a).map(([id]) => centroObj(objetos.get(id)))).filter(Boolean);
+        let wk = null;   // caixa que envolve tudo o que se executa na semana (frentes distantes ficam todas na imagem)
+        if (pk.length) { const bx = new THREE.Box3(); pk.forEach(c => { const e = Math.min(c.r, 30); bx.expandByPoint(c.p.clone().addScalar(e)); bx.expandByPoint(c.p.clone().addScalar(-e)); }); const sz = bx.getSize(new THREE.Vector3()); wk = { c: bx.getCenter(new THREE.Vector3()), r: Math.hypot(sz.x, sz.z) / 2 }; }
+        if (wk) vista(wk.c, Math.min(Math.max(45, wk.r * 2.1), dMax), -40 * GR, .7); else if (fr) vistas[1][1](); else vistas[0][1]();
         pintar(id => {
           const s = P.elem.get(id), w = P.elemSem.get(id);
           if (w && w.k.has(k)) return w.atr && k === 0 ? COR_PROG.atr : ck;
@@ -2537,6 +2546,7 @@ async function imagensProgramacao(P) {
   } finally {
     tamFixo = null; redimensionar();
     cronoModo = salvo.modo; cronoD = salvo.d; $('#cronoSoExec').checked = salvo.so;
+    corOrig.forEach((c, mt) => mt.color.setHex(c));
     camera.position.copy(salvo.pos); controls.target.copy(salvo.alvo); controls.update(); aplicarCores();
   }
   return imgs;
@@ -2555,7 +2565,7 @@ function htmlSemanas(P, imgs) {   // Six Week: um bloco por semana (imagem + fre
     ${L.length ? `<div class="sg">${img ? `<img src="${img.url}" alt="${esc(img.nome)}">` : ''}<div class="fr"><h4>Frentes da semana</h4><ul>${frentes}</ul></div></div>
     <table><thead><tr><th>Na semana</th><th>Frente</th><th>Código</th><th>Atividade</th><th>Início prev.</th><th>Fim prev.</th><th>% P6</th><th>Elem.</th></tr></thead><tbody>${lin}</tbody></table>` : '<p class="nota">Nenhuma atividade ligada ao modelo nesta semana.</p>'}</section>`;
   }).join('');
-  return `<h2 class="secao">Programação semana a semana</h2><p class="nota">Cada semana mostra o que começa, continua e termina nela (datas do planejamento atual do P6). Na imagem: cor da semana = atividades da semana${P.temCampo ? '; vermelho (só em S1) = atrasadas a recuperar' : ''}; cinza = feito antes ou previsto concluído; o que vem depois fica oculto. Todas as semanas usam a mesma vista, para comparar.</p>${blocos}`;
+  return `<h2 class="secao">Programação semana a semana</h2><p class="nota">Cada semana mostra o que começa, continua e termina nela (datas do planejamento atual do P6). Na imagem: cor da semana = atividades da semana${P.temCampo ? '; vermelho (só em S1) = atrasadas a recuperar' : ''}; cinza = feito antes ou previsto concluído; o que vem depois fica oculto. A câmera de cada semana enquadra o que se executa nela.</p>${blocos}`;
 }
 const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
 async function excelProgramacao(P, tit) {
@@ -2616,7 +2626,7 @@ function htmlProgramacao(P, tit, imgs, xlsxUrl, nomeArq) {
   ${imgs.filter(m => m.sem === undefined).map(m => `<figure><img src="${m.url}" alt="${esc(m.nome)}"><figcaption>${esc(m.nome)} — cor = semana em que a atividade entra na janela; cinza = concluído ou previsto concluído antes de ${fmtD(P.S)}; o que vem depois da janela fica oculto.</figcaption></figure>`).join('')}
   ${htmlSemanas(P, imgs)}${P.n > 1 ? '<h2 class="secao">Tabela completa da janela</h2>' : ''}
   <table><thead><tr><th>Semana</th><th>Código</th><th>Atividade / WBS</th><th>Início prev.</th><th>Fim prev.</th><th>% P6</th><th>Situação</th><th>Elem.</th><th>Campo</th>${P.per.map(q => `<th>${q.r}<br>${dd(q.a)}</th>`).join('')}</tr></thead><tbody>${lin || `<tr><td colspan="${9 + P.per.length}">Nenhuma atividade ligada ao modelo na janela.</td></tr>`}</tbody></table>
-  <p class="nota"><span class="tag">Critério</span> atividades do P6 ligadas ao modelo 3D, com execução prevista (datas do planejamento atual) na janela e não concluídas (sem fim real / 100% no P6 e sem "concluído" em todos os elementos no campo). ${P.temCampo ? `Atrasada = fim previsto antes de ${fmtD(P.S)} sem conclusão no P6 nem no campo (último registro de campo em ${fmtD(new Date(P.ultCampo))}).` : 'A base de campo não tem registros: as atrasadas não foram calculadas.'} Quadrados da malha do aterro aparecem nas imagens pela data prevista do quadrado (fim − 30 dias). Canteiro de obras: só na tabela. Gerado em ${new Date().toLocaleString('pt-BR')}.</p></main></body></html>`;
+  <p class="nota"><span class="tag">Critério</span> atividades do P6 ligadas ao modelo 3D, com execução prevista (datas do planejamento atual) na janela e não concluídas (sem fim real / 100% no P6 e sem "concluído" em todos os elementos no campo). ${P.temCampo ? `Atrasada = fim previsto antes de ${fmtD(P.S)} sem conclusão no P6 nem no campo (último registro de campo em ${fmtD(new Date(P.ultCampo))}).` : 'A base de campo não tem registros: as atrasadas não foram calculadas.'} Quadrados da malha do aterro aparecem nas imagens pela data prevista do quadrado (fim − 30 dias). Canteiro de obras (ex.: central de concreto): aparece nas imagens das semanas em que tem atividade. Gerado em ${new Date().toLocaleString('pt-BR')}.</p></main></body></html>`;
 }
 let gerandoProg = false;
 function baixarArquivo(blob, nome) {
