@@ -2426,7 +2426,11 @@ function montarProgramacao(S, n) {
     const sit = sem < 0 ? 'Atrasada' : (a.as || cnt.and || cnt.par || a.ps < S) ? 'Em andamento' : 'A iniciar';
     const campoTxt = [cnt.ok && `${cnt.ok} concl.`, cnt.and && `${cnt.and} em and.`, cnt.par && `${cnt.par} paralis.`].filter(Boolean).join(' · ');
     const marcas = per.map(q => sem < 0 ? q === per[0] : a.ps < q.b && a.pe >= q.a);   // atrasada: marcada no 1º período (recuperar)
-    linhas.push({ ...a, sem, sit: sit + (cnt.par ? ' (paralisada no campo)' : ''), campoTxt, nElem: a.ids.size, marcas });
+    // o que acontece com a atividade em cada período: começa, continua, termina (programação semana a semana)
+    const naSem = per.map((q, i) => !marcas[i] ? '' : sem < 0 ? 'Recuperar atraso' : a.ps >= q.a ? (a.pe < q.b ? 'Começa e termina' : 'Começa') : a.pe < q.b ? 'Termina' : 'Continua');
+    const pw = a.w.split(' > '), iCM = pw.findIndex(x => /CONSTRU/i.test(x));
+    const frente = (iCM >= 0 && pw[iCM + 2] ? pw[iCM + 2] : pw[pw.length - 2] || pw[pw.length - 1] || '—').trim();
+    linhas.push({ ...a, sem, sit: sit + (cnt.par ? ' (paralisada no campo)' : ''), campoTxt, nElem: a.ids.size, marcas, naSem, frente });
     codSem.set(a.c, sem);
   }
   linhas.sort((x, y) => x.sem - y.sem || x.ps - y.ps || x.c.localeCompare(y.c));
@@ -2437,14 +2441,20 @@ function montarProgramacao(S, n) {
     if (ss.length) { elem.set(id, Math.min(...ss)); continue; }
     if (ps.every(s => s.e === 'prova' || s.ae || s.p >= 100 || (s.pe && s.pe < S)) || stCampo(id) === 'ok') elem.set(id, 'feito');
   }
-  const cel = new Map();   // quadrados da malha do aterro: data prevista do quadrado (fim − 30 dias → fim)
+  const elemSem = new Map();   // semanas em que cada elemento tem atividade (imagem de cada semana)
+  for (const a of linhas) for (const id0 of a.ids) {
+    const id = id0.replace('#desm', ''); let q = elemSem.get(id); if (!q) elemSem.set(id, q = { k: new Set(), atr: false });
+    a.marcas.forEach((m, i) => m && q.k.add(i)); if (a.sem < 0) q.atr = true;
+  }
+  const cel = new Map(), celInt = new Map();   // quadrados da malha do aterro: data prevista do quadrado (fim − 30 dias → fim)
   for (const o of objetos.values()) if (o.tipo === 'celula' && o.prevFim) {
     const fim = +o.prevFim, ini = fim - 30 * DIA, st = stData(o.id);
     if (st === 'ok') continue;
     if (ini < E && fim >= S) cel.set(o.id, ini < S ? 0 : Math.floor((ini - S) / SEM));
-    else if (fim < S && temCampo) cel.set(o.id, -1);
+    else if (fim < S && temCampo) cel.set(o.id, -1); else continue;
+    celInt.set(o.id, [ini, fim]);
   }
-  return { S, E, n, per, linhas, elem, cel, temCampo, ultCampo, stCampo };
+  return { S, E, n, per, linhas, elem, elemSem, cel, celInt, temCampo, ultCampo, stCampo };
 }
 const corSem = s => s < 0 ? COR_PROG.atr : COR_PROG.sem[Math.min(s, 5)];
 const rotSem = (P, s) => s < 0 ? 'Atrasada' : P.n === 1 ? 'Semana' : `S${s + 1}`;
@@ -2455,20 +2465,25 @@ async function imagensProgramacao(P) {
   const W = 1600, H = 900, imgs = [];
   try {
     cronoModo = 'plan'; $('#cronoSoExec').checked = true; cronoD = new Date(P.S); aplicarCores();   // situação prevista no início da janela
-    for (const o of objetos.values()) {   // pinta a janela por semana; concluído em cinza; o que vem depois fica oculto
-      if (o.tipo === 'celula') {
-        const s = P.cel.get(o.id), mt = o.meshes[0].material; mt.visible = s !== undefined;
-        if (s !== undefined) { mt.color.setHex(corSem(s)); mt.opacity = .8; }
-        continue;
+    const pintar = (corEl, corCel) => {   // cor de cada elemento / quadrado (null = oculto)
+      for (const o of objetos.values()) {
+        if (o.tipo === 'celula') {
+          const c = corCel(o.id), mt = o.meshes[0].material; mt.visible = c != null;
+          if (c != null) { mt.color.setHex(c); mt.opacity = .8; }
+          continue;
+        }
+        if (!porElem.has(o.id) || ['aterro', 'canteiro', 'quadra', 'ponto'].includes(o.tipo)) continue;
+        const c = corEl(o.id);
+        for (const m of o.meshes || []) {
+          m.visible = c != null; if (c == null) continue;
+          if (o.tipo === 'edif') m.scale.y = 1;
+          if (m.material.userData.base !== undefined) { m.material.color.setHex(c); m.material.emissive.setHex(0); }
+        }
       }
-      if (!porElem.has(o.id) || ['aterro', 'canteiro', 'quadra', 'ponto'].includes(o.tipo)) continue;
-      const s = P.elem.get(o.id);
-      for (const m of o.meshes || []) {
-        m.visible = s !== undefined; if (s === undefined) continue;
-        if (o.tipo === 'edif') m.scale.y = 1;
-        if (m.material.userData.base !== undefined) { m.material.color.setHex(s === 'feito' ? COR_PROG.feito : corSem(s)); m.material.emissive.setHex(0); }
-      }
-    }
+    };
+    // visão da janela: cor da semana em que a atividade entra; concluído em cinza; o que vem depois fica oculto
+    const s2c = s => s === undefined ? null : s === 'feito' ? COR_PROG.feito : corSem(s);
+    pintar(id => s2c(P.elem.get(id)), id => s2c(P.cel.get(id)));
     tamFixo = [W, H]; redimensionar();
     const c2 = Object.assign(document.createElement('canvas'), { width: W, height: H }), g = c2.getContext('2d');
     const vista = (alvo, dist, az, incl) => { anim = null; const hz = dist * Math.cos(incl); camera.position.set(alvo.x + hz * Math.sin(az), Math.max(alvo.y + dist * Math.sin(incl), 30), alvo.z + hz * Math.cos(az)); controls.target.copy(alvo); controls.update(); };
@@ -2480,19 +2495,44 @@ async function imagensProgramacao(P) {
     if (fr) vistas.push(['Frentes da janela', () => vista(fr.c, Math.min(Math.max(70, fr.r * 2.6), todos ? Math.max(160, todos.r * 2.1) : 1e9), -40 * GR, .66)]);
     vistas.push(['Vista atual da câmera', () => { anim = null; camera.position.copy(salvo.pos); controls.target.copy(salvo.alvo); controls.update(); }]);
     const tit = P.n === 1 ? 'Programação semanal' : 'Six Week (lookahead 6 semanas)', faixa = `${fmtD(P.S)} a ${fmtD(new Date(+P.E - DIA))}`;
-    for (const [nome, pos] of vistas) {
-      pos(); limitarVista(); controls.update(); renderer.render(scene, camera);
+    const foto = (titulo, sub, dir, leg) => {   // renderiza a vista atual com faixa de título e legenda
+      limitarVista(); controls.update(); renderer.render(scene, camera);
       g.drawImage(renderer.domElement, 0, 0, W, H);
       g.fillStyle = 'rgba(30,58,95,.92)'; g.fillRect(0, 0, W, 70);
-      g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'left'; g.font = '700 26px Segoe UI, Arial'; g.fillText(`TECON Salvador · ${tit}`, 22, 26);
-      g.font = '18px Segoe UI, Arial'; g.globalAlpha = .85; g.fillText(`${nome} · situação prevista em ${fmtD(P.S)} + atividades da janela`, 22, 53); g.globalAlpha = 1;
-      g.textAlign = 'right'; g.font = '700 26px Segoe UI, Arial'; g.fillText(faixa, W - 22, 35);
-      const leg = [...(P.temCampo ? [[COR_PROG.atr, 'Atrasada (campo)']] : []), ...(P.n === 1 ? [[COR_PROG.sem[0], 'Na semana']] : P.per.map((q, i) => [COR_PROG.sem[i], `${q.r} · ${dd(q.a)}–${dd(new Date(+q.b - DIA))}`])), [COR_PROG.feito, 'Concluído / previsto concluído']];
-      const lh = 28, bw = 330, bh = leg.length * lh + 16, bx = 18, by = H - bh - 18;
+      g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'left'; g.font = '700 26px Segoe UI, Arial'; g.fillText(titulo, 22, 26);
+      g.font = '18px Segoe UI, Arial'; g.globalAlpha = .85; g.fillText(sub, 22, 53); g.globalAlpha = 1;
+      g.textAlign = 'right'; g.font = '700 26px Segoe UI, Arial'; g.fillText(dir, W - 22, 35);
+      const lh = 28, bw = 360, bh = leg.length * lh + 16, bx = 18, by = H - bh - 18;
       g.fillStyle = 'rgba(255,255,255,.93)'; g.beginPath(); g.roundRect(bx, by, bw, bh, 10); g.fill();
       g.font = '17px Segoe UI, Arial'; g.textAlign = 'left';
       leg.forEach(([c, t], i) => { const y = by + 8 + i * lh + lh / 2; g.fillStyle = hex(c); g.fillRect(bx + 14, y - 8, 22, 16); g.fillStyle = '#1e293b'; g.fillText(t, bx + 46, y); });
-      imgs.push({ nome, url: c2.toDataURL('image/jpeg', .9) });
+      return c2.toDataURL('image/jpeg', .9);
+    };
+    const legJ = [...(P.temCampo ? [[COR_PROG.atr, 'Atrasada (campo)']] : []), ...(P.n === 1 ? [[COR_PROG.sem[0], 'Na semana']] : P.per.map((q, i) => [COR_PROG.sem[i], `${q.r} · ${dd(q.a)}–${dd(new Date(+q.b - DIA))}`])), [COR_PROG.feito, 'Concluído / previsto concluído']];
+    for (const [nome, pos] of vistas) { pos(); imgs.push({ nome, url: foto(`TECON Salvador · ${tit}`, `${nome} · situação prevista em ${fmtD(P.S)} + atividades da janela`, faixa, legJ) }); }
+    // uma imagem por semana (Six Week): o que se faz na semana em destaque, o que já foi feito em cinza, o que vem depois oculto
+    if (P.n > 1) {
+      // mesma vista em todas as semanas (para comparar), enquadrando os elementos com atividade em alguma semana da janela
+      const ws = enquadrar([...P.elemSem.keys()].map(id => objetos.get(id)).filter(o => o && o.tipo !== 'canteiro').map(centroObj).filter(Boolean)
+        .concat([...P.cel.keys()].map(id => centroObj(objetos.get(id))).filter(Boolean)), .85);
+      if (ws) vista(ws.c, Math.min(Math.max(55, ws.r * 2.3), todos ? Math.max(160, todos.r * 2.1) : 1e9), -40 * GR, .7);
+      else if (fr) vistas[1][1](); else vistas[0][1]();
+      for (let k = 0; k < P.n; k++) {
+        const q = P.per[k], ck = corSem(k);
+        pintar(id => {
+          const s = P.elem.get(id), w = P.elemSem.get(id);
+          if (w && w.k.has(k)) return w.atr && k === 0 ? COR_PROG.atr : ck;
+          if (s === undefined || (typeof s === 'number' && s > k)) return null;
+          return COR_PROG.feito;
+        }, id => {
+          const s = P.cel.get(id); if (s === undefined) return null;
+          if (s < 0) return k === 0 ? COR_PROG.atr : COR_PROG.feito;
+          const [a, b] = P.celInt.get(id);
+          return a < +q.b && b >= +q.a ? ck : a >= +q.b ? null : COR_PROG.feito;
+        });
+        const leg = [[ck, `Atividades da semana ${q.r}`], ...(k === 0 && P.temCampo ? [[COR_PROG.atr, 'Atrasada — recuperar nesta semana']] : []), [COR_PROG.feito, 'Feito antes / previsto concluído']];
+        imgs.push({ nome: `${q.r} · ${dd(q.a)} a ${dd(new Date(+q.b - DIA))}`, sem: k, url: foto(`TECON Salvador · Six Week · semana ${q.r}`, `O que fazer de ${fmtD(q.a)} a ${fmtD(new Date(+q.b - DIA))} · cor = atividades da semana; depois da semana fica oculto`, q.r, leg) });
+      }
     }
   } finally {
     tamFixo = null; redimensionar();
@@ -2500,6 +2540,22 @@ async function imagensProgramacao(P) {
     camera.position.copy(salvo.pos); controls.target.copy(salvo.alvo); controls.update(); aplicarCores();
   }
   return imgs;
+}
+const ORDEM_NA_SEM = ['Recuperar atraso', 'Começa', 'Começa e termina', 'Continua', 'Termina'];
+const semanaProg = (P, k) => P.linhas.filter(a => a.marcas[k]).sort((x, y) => ORDEM_NA_SEM.indexOf(x.naSem[k]) - ORDEM_NA_SEM.indexOf(y.naSem[k]) || x.frente.localeCompare(y.frente) || x.ps - y.ps || x.c.localeCompare(y.c));
+function htmlSemanas(P, imgs) {   // Six Week: um bloco por semana (imagem + frentes + lista do que começa, continua e termina)
+  if (P.n === 1) return '';
+  const blocos = P.per.map((q, k) => {
+    const L = semanaProg(P, k), cor = hex(corSem(k)), img = imgs.find(m => m.sem === k), cnt = {}, fr = new Map();
+    L.forEach(a => { const t = a.naSem[k]; cnt[t] = (cnt[t] || 0) + 1; const f = fr.get(a.frente) || fr.set(a.frente, { n: 0, ini: 0, fim: 0 }).get(a.frente); f.n++; if (t.startsWith('Começa')) f.ini++; if (t.endsWith('ermina')) f.fim++; });
+    const resumo = ORDEM_NA_SEM.filter(t => cnt[t]).map(t => `<span class="ns ns${ORDEM_NA_SEM.indexOf(t)}">${cnt[t]} ${t.toLowerCase()}</span>`).join(' ');
+    const frentes = [...fr].sort((a, b) => b[1].n - a[1].n).map(([f, v]) => `<li><b>${esc(f)}</b> — ${v.n} ativ.${v.ini ? ` · ${v.ini} começa${v.ini > 1 ? 'm' : ''}` : ''}${v.fim ? ` · ${v.fim} termina${v.fim > 1 ? 'm' : ''}` : ''}</li>`).join('');
+    const lin = L.map(a => `<tr><td><span class="ns ns${ORDEM_NA_SEM.indexOf(a.naSem[k])}">${a.naSem[k]}</span></td><td>${esc(a.frente)}</td><td>${esc(a.c)}</td><td>${esc(a.n)}</td><td>${fmtD(a.ps)}</td><td>${fmtD(a.pe)}</td><td class="n">${fmt(a.p)}%</td><td class="n">${a.nElem}</td></tr>`).join('');
+    return `<section class="semana"><div class="sh" style="border-color:${cor}"><b style="color:${cor}">${q.r}</b><div><h3>Semana ${q.r} · ${fmtD(q.a)} a ${fmtD(new Date(+q.b - DIA))}</h3><div>${L.length} atividades ${resumo}</div></div></div>
+    ${L.length ? `<div class="sg">${img ? `<img src="${img.url}" alt="${esc(img.nome)}">` : ''}<div class="fr"><h4>Frentes da semana</h4><ul>${frentes}</ul></div></div>
+    <table><thead><tr><th>Na semana</th><th>Frente</th><th>Código</th><th>Atividade</th><th>Início prev.</th><th>Fim prev.</th><th>% P6</th><th>Elem.</th></tr></thead><tbody>${lin}</tbody></table>` : '<p class="nota">Nenhuma atividade ligada ao modelo nesta semana.</p>'}</section>`;
+  }).join('');
+  return `<h2 class="secao">Programação semana a semana</h2><p class="nota">Cada semana mostra o que começa, continua e termina nela (datas do planejamento atual do P6). Na imagem: cor da semana = atividades da semana${P.temCampo ? '; vermelho (só em S1) = atrasadas a recuperar' : ''}; cinza = feito antes ou previsto concluído; o que vem depois fica oculto. Todas as semanas usam a mesma vista, para comparar.</p>${blocos}`;
 }
 const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
 async function excelProgramacao(P, tit) {
@@ -2521,7 +2577,17 @@ async function excelProgramacao(P, tit) {
     ['Gerado em', new Date().toLocaleString('pt-BR')]];
   const ws3 = X.utils.aoa_to_sheet(par); ws3['!cols'] = [{ wch: 16 }, { wch: 120 }];
   const wb = X.utils.book_new();
-  X.utils.book_append_sheet(wb, ws, 'Programação'); X.utils.book_append_sheet(wb, ws2, 'Elementos'); X.utils.book_append_sheet(wb, ws3, 'Parâmetros');
+  X.utils.book_append_sheet(wb, ws, 'Programação');
+  if (P.n > 1) {   // Six Week: o que se faz em cada semana (uma linha por atividade e semana)
+    const ss = [['Semana', 'Período', 'Na semana', 'Frente', 'Código P6', 'Atividade', 'Início previsto', 'Fim previsto', '% P6', 'Situação', 'Nº elementos']];
+    for (const k of P.per.keys()) for (const a of semanaProg(P, k)) ss.push([P.per[k].r, `${dd(P.per[k].a)} a ${dd(new Date(+P.per[k].b - DIA))}`, a.naSem[k], a.frente, a.c, a.n, meio(a.ps), meio(a.pe), a.p / 100, a.sit, a.nElem]);
+    const w4 = X.utils.aoa_to_sheet(ss, { dateNF: 'dd/mm/yyyy', cellDates: true });
+    w4['!cols'] = [7, 14, 17, 34, 12, 60, 12, 12, 7, 26, 11].map(wch => ({ wch }));
+    w4['!autofilter'] = { ref: X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: ss.length - 1, c: 10 } }) };
+    for (let r = 1; r < ss.length; r++) { const c = w4[X.utils.encode_cell({ r, c: 8 })]; if (c) c.z = '0%'; }
+    X.utils.book_append_sheet(wb, w4, 'Semana a semana');
+  }
+  X.utils.book_append_sheet(wb, ws2, 'Elementos'); X.utils.book_append_sheet(wb, ws3, 'Parâmetros');
   return new Blob([X.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 function htmlProgramacao(P, tit, imgs, xlsxUrl, nomeArq) {
@@ -2538,11 +2604,17 @@ function htmlProgramacao(P, tit, imgs, xlsxUrl, nomeArq) {
   table{width:100%;border-collapse:collapse;background:#fff;font-size:11px} th{background:#1e3a5f;color:#fff;text-align:left;padding:5px;position:sticky;top:0} td{padding:4px 5px;border-bottom:1px solid #e2e8f0;vertical-align:top}
   td.n{text-align:right} td.g{text-align:center;width:34px} td.g i{display:block;height:12px;border-radius:2px} .w{color:#64748b;font-size:10px} .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
   .nota{color:#475569;font-size:11px;margin:10px 0} .tag{background:#fef3c7;border-radius:4px;padding:0 4px;font-size:10px}
-  @media print{body{background:#fff}.barra{display:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}th,td.g i,.sw,.k i{-webkit-print-color-adjust:exact;print-color-adjust:exact}figure{page-break-after:always;box-shadow:none}thead{display:table-header-group}tr{break-inside:avoid}}
+  h2.secao{font-size:17px;color:#1e3a5f;margin:18px 0 4px} .semana{background:#fff;border-radius:8px;box-shadow:0 1px 2px #0001;margin:0 0 16px;overflow:hidden}
+  .sh{display:flex;gap:14px;align-items:center;padding:10px 14px;border-left:10px solid;background:#f8fafc} .sh>b{font-size:30px} .sh h3{margin:0 0 3px;font-size:16px}
+  .sg{display:grid;grid-template-columns:62% 1fr;gap:12px;padding:10px 14px} .sg img{width:100%;border-radius:6px;display:block} .fr h4{margin:0 0 6px;font-size:13px;color:#1e3a5f} .fr ul{margin:0;padding-left:16px} .fr li{margin:0 0 4px}
+  .semana table{border-top:1px solid #e2e8f0} .ns{display:inline-block;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;white-space:nowrap}
+  .ns0{background:#fee2e2;color:#991b1b} .ns1{background:#dcfce7;color:#166534} .ns2{background:#e0e7ff;color:#3730a3} .ns3{background:#f1f5f9;color:#334155} .ns4{background:#fef3c7;color:#92400e}
+  @media print{.semana{break-before:page;box-shadow:none}.sh,.ns{-webkit-print-color-adjust:exact;print-color-adjust:exact}body{background:#fff}.barra{display:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}th,td.g i,.sw,.k i{-webkit-print-color-adjust:exact;print-color-adjust:exact}figure{page-break-after:always;box-shadow:none}thead{display:table-header-group}tr{break-inside:avoid}}
   </style></head><body><header><div><h1>TECON Salvador · ${esc(tit)}</h1><p>${esc(CRONO.arquivo)} · data dos dados ${fmtD(dataP6(CRONO.dataDados))} · base de campo: ${esc(lerLS(CHAVE_BASE + '-nome') || 'local')}</p></div><h1>${faixa}</h1></header>
-  <div class="barra"><button onclick="print()">🖨 Imprimir / salvar PDF</button>${xlsxUrl ? `<a href="${xlsxUrl}" download="${nomeArq}.xlsx">⬇ Excel (.xlsx)</a>` : ''}${imgs.map((m, i) => `<a href="${m.url}" download="${nomeArq}-imagem-${i + 1}.jpg">⬇ ${esc(m.nome)}</a>`).join('')}</div>
+  <div class="barra"><button onclick="print()">🖨 Imprimir / salvar PDF</button>${xlsxUrl ? `<a href="${xlsxUrl}" download="${nomeArq}.xlsx">⬇ Excel (.xlsx)</a>` : ''}${imgs.map((m, i) => `<a href="${m.url}" download="${nomeArq}-imagem-${i + 1}.jpg">⬇ ${esc(m.sem === undefined ? m.nome : m.nome.split(' ')[0])}</a>`).join('')}</div>
   <main><div class="kp"><div class="k"><b>${P.linhas.length}</b><span>atividades P6 na programação</span></div>${kp}</div>
-  ${imgs.map(m => `<figure><img src="${m.url}" alt="${esc(m.nome)}"><figcaption>${esc(m.nome)} — cor = semana em que a atividade entra na janela; cinza = concluído ou previsto concluído antes de ${fmtD(P.S)}; o que vem depois da janela fica oculto.</figcaption></figure>`).join('')}
+  ${imgs.filter(m => m.sem === undefined).map(m => `<figure><img src="${m.url}" alt="${esc(m.nome)}"><figcaption>${esc(m.nome)} — cor = semana em que a atividade entra na janela; cinza = concluído ou previsto concluído antes de ${fmtD(P.S)}; o que vem depois da janela fica oculto.</figcaption></figure>`).join('')}
+  ${htmlSemanas(P, imgs)}${P.n > 1 ? '<h2 class="secao">Tabela completa da janela</h2>' : ''}
   <table><thead><tr><th>Semana</th><th>Código</th><th>Atividade / WBS</th><th>Início prev.</th><th>Fim prev.</th><th>% P6</th><th>Situação</th><th>Elem.</th><th>Campo</th>${P.per.map(q => `<th>${q.r}<br>${dd(q.a)}</th>`).join('')}</tr></thead><tbody>${lin || `<tr><td colspan="${9 + P.per.length}">Nenhuma atividade ligada ao modelo na janela.</td></tr>`}</tbody></table>
   <p class="nota"><span class="tag">Critério</span> atividades do P6 ligadas ao modelo 3D, com execução prevista (datas do planejamento atual) na janela e não concluídas (sem fim real / 100% no P6 e sem "concluído" em todos os elementos no campo). ${P.temCampo ? `Atrasada = fim previsto antes de ${fmtD(P.S)} sem conclusão no P6 nem no campo (último registro de campo em ${fmtD(new Date(P.ultCampo))}).` : 'A base de campo não tem registros: as atrasadas não foram calculadas.'} Quadrados da malha do aterro aparecem nas imagens pela data prevista do quadrado (fim − 30 dias). Canteiro de obras: só na tabela. Gerado em ${new Date().toLocaleString('pt-BR')}.</p></main></body></html>`;
 }
