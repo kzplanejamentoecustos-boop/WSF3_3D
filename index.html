@@ -2195,6 +2195,9 @@ const NOME_ETAPA_APONT = { cravacao: 'Cravação da camisa', escavacao: 'Pinagem
   perfuracao: 'Perfuração', camisa: 'Camisa Ø410', magro: 'Concreto magro', armacao1: 'Armadura', concretagem1: 'Concretagem 1ª fase', resistencia1: 'Resistência 1ª fase', concretagem2: 'Concretagem 2ª fase',
   montagem: 'Montagem', armacao: 'Armadura', bgtc: 'BGTC', areia: 'Berço de areia', paver: 'Paver', locacao: 'Locação', forma: 'Forma', plato: 'Platô', instalacoes: 'Instalações' };
 const normTxt = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+// Pré-lajes do 01A: código do apontador ("PM-201 #07") -> peça do 3D. Os dois vêm do DWG-00017 rev. A; casadas por posição
+// (desvio máx. 3 cm) com a mesma numeração do controle dos apontadores (por faixa, da linha A para a H, e ao longo dos eixos).
+const LAJE_APONT_01A = {"PM-211":"PL-01A-001","PM-201 #01":"PL-01A-002","PM-201 #02":"PL-01A-003","PM-201 #03":"PL-01A-004","PM-201 #04":"PL-01A-005","PM-201 #05":"PL-01A-006","PM-201 #06":"PL-01A-007","PM-201 #07":"PL-01A-008","PM-201 #08":"PL-01A-009","PM-201 #09":"PL-01A-010","PM-201 #10":"PL-01A-011","PM-201 #11":"PL-01A-012","PM-203 #01":"PL-01A-024","PM-203 #02":"PL-01A-025","PM-201 #12":"PL-01A-013","PM-201 #13":"PL-01A-014","PM-201 #14":"PL-01A-015","PM-201 #15":"PL-01A-016","PM-201 #16":"PL-01A-017","PM-201 #17":"PL-01A-018","PM-201 #18":"PL-01A-019","PM-201 #19":"PL-01A-020","PM-201 #20":"PL-01A-021","PM-201 #21":"PL-01A-022","PM-201 #22":"PL-01A-023","PM-201 #23":"PL-01A-027","PM-201 #24":"PL-01A-028","PM-201 #25":"PL-01A-029","PM-201 #26":"PL-01A-030","PM-201 #27":"PL-01A-031","PM-201 #28":"PL-01A-032","PM-201 #29":"PL-01A-033","PM-201 #30":"PL-01A-034","PM-201 #31":"PL-01A-035","PM-201 #32":"PL-01A-036","PM-201 #33":"PL-01A-037","PM-201 #34":"PL-01A-038","PM-201 #35":"PL-01A-039","PM-201 #36":"PL-01A-040","PM-201 #37":"PL-01A-041","PM-201 #38":"PL-01A-042","PM-201 #39":"PL-01A-043","PM-201 #40":"PL-01A-044","PM-201 #41":"PL-01A-045","PM-201 #42":"PL-01A-046","PM-201 #43":"PL-01A-047","PM-201 #44":"PL-01A-048","PM-201 #45":"PL-01A-049","PM-201 #46":"PL-01A-050","PM-201 #47":"PL-01A-051","PM-201 #48":"PL-01A-052","PM-201 #49":"PL-01A-053","PM-201 #50":"PL-01A-054","PM-201 #51":"PL-01A-055","PM-201 #52":"PL-01A-056","PM-201 #53":"PL-01A-057","PM-201 #54":"PL-01A-058","PM-201 #55":"PL-01A-059","PM-201 #56":"PL-01A-060","PM-201 #57":"PL-01A-061","PM-201 #58":"PL-01A-062","PM-201 #59":"PL-01A-063","PM-201 #60":"PL-01A-064","PM-201 #61":"PL-01A-065","PM-201 #62":"PL-01A-066","PM-201 #63":"PL-01A-067","PM-201 #64":"PL-01A-068","PM-201 #65":"PL-01A-069","PM-201 #66":"PL-01A-070","PM-201 #67":"PL-01A-071","PM-213":"PL-01A-080","PM-210 #01":"PL-01A-072","PM-210 #02":"PL-01A-073","PM-214 #01":"PL-01A-081","PM-210 #03":"PL-01A-074","PM-214 #02":"PL-01A-082","PM-210 #04":"PL-01A-075","PM-214 #03":"PL-01A-083","PM-210 #05":"PL-01A-076","PM-214 #04":"PL-01A-084","PM-210 #06":"PL-01A-077","PM-214 #05":"PL-01A-085","PM-210 #07":"PL-01A-078","PM-214 #06":"PL-01A-086","PM-210 #08":"PL-01A-079","PM-214 #07":"PL-01A-087"};
 function idDoApont(idA, tipo) {   // código do apontador -> elemento do 3D (null = ainda sem correspondência)
   const existe = i => objetos.has(i) ? i : null;
   const perto = (p, filtro, raio) => { let m = null, dm = raio; for (const o of objetos.values()) { if (!filtro(o)) continue; const c = centroObj(o); if (!c) continue; const d = Math.hypot(c.p.x - p.x, c.p.z - p.z); if (d < dm) { dm = d; m = o.id; } } return m; };
@@ -2223,7 +2226,24 @@ function idDoApont(idA, tipo) {   // código do apontador -> elemento do 3D (nul
   }
   if (tipo === 'canteiro') { const n = normTxt(idA.replace(/^Canteiro( \d+)? · /i, '')); for (const o of objetos.values()) if (o.tipo === 'canteiro' && normTxt(o.nome) === n) return o.id; return null; }
   if (tipo === 'base-central') return existe('CT-16');   // bases da central de concreto: a central inteira fica "em andamento"
-  return null;   // pré-lajes, concreto moldado no local, pavimento: ainda sem correspondência no 3D
+  if (tipo === 'laje') return existe(LAJE_APONT_01A[idA]) ;   // 01B: arranjo esquemático no controle dos apontadores, sem par
+  if (tipo === 'cip') {   // concreto moldado no local (fases 1A, 1B, 1C, 2A do 01A); a 2B ainda não está no 3D
+    const cml = f => [...objetos.values()].filter(o => o.tipo === 'cml' && o.id.startsWith(`CML-${f}-`));
+    const a0 = pEst('0-A'), a3 = pEst('3-A'); if (!a0 || !a3) return null;
+    const dir = a3.clone().sub(a0).normalize();
+    const pontoLinha = L => { const v = [...objetos.values()].filter(o => o.grupo === 'vuE' && o.linha === L).map(o => centroObj(o)?.p).filter(Boolean); return v[0] || null; };
+    const distLinha = (o, L) => { const q = pontoLinha(L), c = centroObj(o)?.p; if (!q || !c) return 1e9; const w = c.clone().sub(q); return Math.abs(w.x * dir.z - w.z * dir.x); };
+    const pertoDe = (lista, p, raio) => { let m = null, dm = raio; for (const o of lista) { const c = centroObj(o)?.p; if (!c) continue; const d = Math.hypot(c.x - p.x, c.z - p.z); if (d < dm) { dm = d; m = o.id; } } return m; };
+    let m;
+    if ((m = idA.match(/^1A · bloco (\S+)$/))) { const a = pEst(m[1] + '1'), b = pEst(m[1] + '2'); return a && b ? pertoDe(cml('1A'), a.clone().add(b).multiplyScalar(.5), 3) : null; }
+    if ((m = idA.match(/^1A · (\d+-[A-N]\d?)$/))) { const p = pEst(m[1]); return p ? pertoDe(cml('1A'), p, 1.5) : null; }
+    if ((m = idA.match(/^1B · bloco (\S+)$/))) { const a = pEst(m[1] + '1'), b = pEst(m[1] + '2'); return a && b ? pertoDe(cml('1B'), a.clone().add(b).multiplyScalar(.5), 4) : null; }
+    if ((m = idA.match(/^1C · linha ([A-N])$/))) { const LS = 'ABCDEFGH'.split(''), maisPerto = o => LS.reduce((x, y) => distLinha(o, y) < distLinha(o, x) ? y : x);
+      const v = cml('1C').filter(o => maisPerto(o) === m[1]).map(o => o.id); return v.length ? v : null; }
+    if ((m = idA.match(/^2A · faixa ([A-N])$/))) { const v = cml('2A').filter(o => distLinha(o, m[1]) < 1.2).map(o => o.id); return v.length ? v : null; }
+    return null;
+  }
+  return null;   // pavimento e a capa 2B: ainda não existem no 3D
 }
 const dApont = s => s ? new Date(s + 'T00:00') : null;
 const apontInfo = { estado: 'lendo' };
@@ -2234,7 +2254,7 @@ function aplicarApontadores(base, origem) {
     const nomeEt = k => NOME_ETAPA_APONT[k] || k.charAt(0).toUpperCase() + k.slice(1);
     const etapas = Object.entries(reg).filter(([, v]) => v && (v.inicio || v.data)).map(([k, v]) => ({ k, nome: nomeEt(k), ini: dApont(v.inicio || v.data), fim: dApont(v.data) }));
     if (!etapas.length) continue;
-    const id3 = idDoApont(r.id, tipo); if (!id3) { semPar.push(r.id); continue; }
+    const id3s = [].concat(idDoApont(r.id, tipo) || []); if (!id3s.length) { semPar.push(r.id); continue; }
     const ini = new Date(Math.min(...etapas.map(e => +e.ini))), ck = CONCLUI_APONT[tipo];
     let fim = null;
     if (ck) fim = dApont(reg[ck]?.data); else if (/conclu/i.test(b.status || '')) fim = new Date(Math.max(...etapas.filter(e => e.fim).map(e => +e.fim)));
@@ -2243,13 +2263,15 @@ function aplicarApontadores(base, origem) {
     const ult = new Date(Math.max(...etapas.flatMap(e => [+e.ini, +(e.fim || 0)])));
     const e3 = ETAPA3D_APONT[tipo] ? etapas.filter(e => ETAPA3D_APONT[tipo][e.k]).map(e => ({ ...e, k: ETAPA3D_APONT[tipo][e.k] })) : null;
     const item = { origem: r.id, tipo: b.tipo || tipo, status: b.status || '', ini, fim, ult, frac: fim ? 1 : Math.min(.95, feitas / total), etapas, etapas3d: e3, obs: r.observacao || '', pend: r.pendencia ? r.descricaoPendencia || 'sim' : '' };
+    for (const id3 of id3s) {   // um registro pode cobrir várias peças do 3D (ex.: 1C da linha inteira)
     const ant = novo.get(id3);
     if (ant) {   // vários registros num elemento do 3D (ex.: bases da central): junta
       ant.ini = new Date(Math.min(+ant.ini, +ini)); ant.ult = new Date(Math.max(+ant.ult, +ult)); ant.fim = ant.fim && fim ? new Date(Math.max(+ant.fim, +fim)) : null;
       ant.origem += ', ' + r.id; ant.etapas = ant.etapas.concat(etapas.map(e => ({ ...e, nome: `${r.id} · ${e.nome}` }))); ant.frac = Math.min(ant.frac, item.frac); ant.status = ant.fim ? ant.status : 'Em execução';
     } else {
       if (tipo === 'base-central') { item.etapas = etapas.map(e => ({ ...e, nome: `${r.id} · ${e.nome}` })); item.status = 'Em execução'; }
-      novo.set(id3, item);
+      novo.set(id3, id3s.length > 1 ? { ...item } : item);
+    }
     }
   }
   apont = novo;
