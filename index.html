@@ -763,7 +763,7 @@ PM_E.forEach(p => {
   const m = extrusao(p.pts, yEL(t), t - b, matF(I.cor)); camada(I.camada).add(m);
   const ex = p.tipo === 'capitel' && !p.estaca;
   const nomeBloco = /^PM-/.test(p.bloco) ? p.bloco : `sem nome de PM no desenho (bloco "${p.bloco}")`;
-  registrar({ id: p.id, tipo: 'pm', grupo: I.grupo, linha: linhaDe(p.eixo), nome: `${I.nome} · ${p.eixo}`, meshes: [m], info: () => [
+  registrar({ id: p.id, tipo: 'pm', grupo: I.grupo, linha: linhaDe(p.eixo), bloco: p.bloco, nome: `${I.nome} · ${p.eixo}`, meshes: [m], info: () => [
     ['Peça', `${esc(nomeBloco)} ${T.ext}`],
     ['Tipo', `${I.nome} — ${I.fase} ${T.ext}`],
     ['Posição', `${esc(p.eixo)} ${T.ext}`],
@@ -2208,6 +2208,14 @@ function idDoApont(idA, tipo) {   // código do apontador -> elemento do 3D (nul
     return perto(a.clone().add(b).multiplyScalar(.5), o => o.grupo === 'vtE', 4);
   }
   if (tipo === 'viga-u') {
+    const q = idA.match(/^(PM-\d+)\s*\(([A-N])(\d+)\)$/);   // 01A: "PM-103 (A1)" = linha A, 1ª peça a partir da borda (eixo −1)
+    if (q) {
+      const a0 = pEst('0-A'), a3 = pEst('3-A'); if (!a0 || !a3) return null;
+      const dir = a3.clone().sub(a0), pos = o => { const c = centroObj(o); return c ? c.p.clone().sub(a0).dot(dir) : null; };
+      const lista = [...objetos.values()].filter(o => o.grupo === 'vuE' && o.linha === q[2] && pos(o) != null).sort((x, y) => pos(x) - pos(y));
+      const o = lista[+q[3] - 1];
+      return o && String(o.bloco || '').replace(/'/g, '') === q[1] ? o.id : null;   // confere o tipo da peça; se não bater, fica sem par
+    }
     const m = idA.match(/\(([A-N])\s+(-?\d+)-(-?\d+)\)/); if (!m) return null;
     const re = new RegExp(`· ${m[1]} / ${m[2]}–${m[3]}(\\s|$)`);
     for (const o of objetos.values()) if ((o.tipo === 'viga' || ['vuE', 'viga'].includes(o.grupo)) && re.test(o.nome || '')) return o.id;
@@ -2266,7 +2274,7 @@ async function carregarApontadores() {
     if (!auth.currentUser) throw Object.assign(new Error('sem login'), { code: 'sem-login' });
     const c = await F.getDoc(F.doc(F.getFirestore(app), 'obras', APONT.obra, `${APONT.controle}_conteudo`, APONT.doc));
     if (!c.exists()) throw new Error('base dos apontadores não encontrada');
-    const base = JSON.parse(c.data().conteudo), salvoEm = c.data().salvoEm || null, lido = new Date().toISOString();
+    const base = JSON.parse(c.data().conteudo), sv = c.data().salvoEm || base.salvoEm || null, salvoEm = sv && sv.toDate ? sv.toDate().toISOString() : sv, lido = new Date().toISOString();
     try { localStorage.setItem(APONT.cache, JSON.stringify({ salvoEm, lido, base })); } catch (e) { }
     apontInfo.estado = 'ok'; aplicarApontadores(base, { salvoEm, lido, cache: false });
     toast(`Avanço de campo atualizado: ${apont.size} elementos`);
@@ -2274,7 +2282,7 @@ async function carregarApontadores() {
     const semLogin = e.code === 'sem-login' || /permission/i.test(String(e.code || e.message || ''));
     apontInfo.estado = semLogin ? 'login' : 'erro';
     let cache = null; try { cache = JSON.parse(localStorage.getItem(APONT.cache) || 'null'); } catch (x) { }
-    if (cache && cache.base) aplicarApontadores(cache.base, { salvoEm: cache.salvoEm, lido: cache.lido, cache: true });
+    if (cache && cache.base) aplicarApontadores(cache.base, { salvoEm: cache.salvoEm || cache.base.salvoEm, lido: cache.lido, cache: true });
     const aviso = semLogin ? 'Sem login do Portal KZ neste navegador: entre pelo botão abaixo e depois clique em <b>Atualizar do campo</b>.' : `Não foi possível ler o controle dos apontadores (${esc(e.message)}).`;
     if (cache && cache.base) { $('#apontLogin').hidden = !semLogin; $('#apontInfo').insertAdjacentHTML('afterbegin', `<span style="color:#b45309">${aviso}</span><br>`); }
     else mostrarApontInfo(`<span style="color:#b45309">${aviso}</span><br>Sem o controle dos apontadores, o avanço real usa só o registro manual e as datas reais do P6.`);
