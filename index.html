@@ -167,6 +167,11 @@ textarea{min-height:64px;resize:vertical}
         <button data-m="crono">Cronograma</button>
       </div>
     </div>
+    <div class="sec" id="painelApont">
+      <h3>Avanço de campo</h3>
+      <p class="nota" id="apontInfo" style="margin:0 0 6px">Controle dos apontadores: lendo…</p>
+      <div class="btns"><button class="btn" id="apontAtualizar" title="Lê de novo a base do Controle de Execução em Campo (apontadores). Precisa do login do Portal KZ neste navegador.">🔄 Atualizar do campo</button><a class="btn" id="apontLogin" href="https://kzplanejamentoecustos-boop.github.io/controle-de-atividades/?obra=wsf3" target="_blank" rel="noopener" hidden title="Abre o controle dos apontadores: entre com o login do Portal KZ e depois volte aqui e clique em Atualizar do campo">🔑 Entrar no Portal KZ</a></div>
+    </div>
     <div class="sec" id="painelCrono" hidden>
       <h3>Cronograma P6</h3>
       <p class="nota" id="cronoFonte"></p>
@@ -305,12 +310,16 @@ function toast(m) { const t = $('#toast'); t.textContent = m; t.style.display = 
 let controle = {};
 try { controle = JSON.parse(localStorage.getItem(CHAVE) || '{}') || {}; } catch (e) { controle = {}; }
 function salvarControle() { try { localStorage.setItem(CHAVE, JSON.stringify(controle)); } catch (e) { toast('Não foi possível salvar neste navegador'); } }
-const statusDe = id => (controle[id] && controle[id].status) || 'nao';
+// avanço de campo vindo do controle dos apontadores (somente leitura): id do 3D -> { ini, fim, frac, etapas, origem }
+let apont = new Map();
+const stApont = (a, D) => a.fim && D >= a.fim ? 'ok' : a.ini && D >= a.ini ? 'and' : null;
+const statusDe = id => apont.has(id) ? (stApont(apont.get(id), new Date()) || 'nao') : (controle[id] && controle[id].status) || 'nao';
 // registro de campo no cronograma: o status salvo vale a partir da "data da última verificação" (sem data: a partir de quando foi salvo)
 const dataCampo = c => c.data ? new Date(c.data + 'T00:00') : c.atualizado ? new Date(c.atualizado) : null;
 let semCampo = false;   // vídeo comparativo: a metade "previsto" mostra só o P6, sem registros de campo
 function campo(id, D) {
   if (semCampo) return null;
+  if (apont.has(id)) return stApont(apont.get(id), D);
   const c = controle[id]; if (!c || !c.status || c.status === 'nao') return null;
   const d = dataCampo(c); return d && D >= d ? c.status : null;
 }
@@ -1493,6 +1502,13 @@ function mapearCrono() {
   cronoLig = usadas.size;
 }
 function estadoCrono(id, D, modo) {
+  const ap = modo === 'real' && !semCampo ? apont.get(id) : null;
+  if (ap && ap.etapas3d) {   // estaca com registro dos apontadores: etapas reais do campo
+    const feitos = new Set(), fazendo = new Set();
+    for (const e of ap.etapas3d) { if (e.fim && e.fim <= D) feitos.add(e.k); else if (e.ini && e.ini <= D) fazendo.add(e.k); }
+    for (const e of feitos) fazendo.delete(e);
+    return { feitos, fazendo, total: ap.etapas3d.length };
+  }
   const ps = porElem.get(id); if (!ps) return null;
   const feitos = new Set(), fazendo = new Set(), todas = new Set();
   for (const s of ps) {
@@ -1507,10 +1523,12 @@ function estadoCrono(id, D, modo) {
 function fracComCampo(id, f) {   // concluído em campo = 100%; em andamento/paralisado = avanço informado (ou 50%)
   const fc = campo(id, cronoD); if (!fc) return f;
   if (fc === 'ok') return 1;
+  if (apont.has(id)) return Math.max(f, apont.get(id).frac || .5);
   const av = controle[id].avanco; return Math.max(f, av !== '' && av != null ? +av / 100 : .5);
 }
 function corCrono(o) {
-  const fc = campo(o.id, cronoD);   // registro de campo tem prioridade sobre o P6
+  let fc = campo(o.id, cronoD);   // registro de campo tem prioridade sobre o P6
+  if (fc === 'and' && o.tipo === 'estaca' && cronoModo === 'real' && apont.get(o.id)?.etapas3d) fc = null;   // estaca dos apontadores: cor da última etapa feita
   if (fc) return fc === 'ok' ? COR_CRONO.feito : fc === 'par' ? COR_STATUS.par : COR_CRONO.parcial;
   const s = estadoCrono(o.id, cronoD, cronoModo); if (!s) return COR_CRONO.semDado;
   if (o.tipo === 'estaca') {
@@ -1538,7 +1556,7 @@ function atualizarDataCrono(d, recolorir = true) {
   if (recolorir) aplicarCores();
 }
 // fim da animação: o do P6; no realizado, se houver registro de campo depois dele (atraso), vai até o último registro
-function ultimoCampo() { let u = 0; for (const c of Object.values(controle)) if (c && c.status && c.status !== 'nao') { const d = dataCampo(c); if (d && +d > u) u = +d; } return u; }
+function ultimoCampo() { let u = 0; for (const c of Object.values(controle)) if (c && c.status && c.status !== 'nao') { const d = dataCampo(c); if (d && +d > u) u = +d; } for (const a of apont.values()) u = Math.max(u, +(a.ult || 0)); return u; }
 const fimAnimacao = () => new Date(Math.max(+cronoMax, cronoModo === 'real' ? ultimoCampo() : 0));
 const fimObra = () => cronoModo === 'real' ? fimAnimacao() : cronoMax;
 function kpisCrono() {
@@ -1845,7 +1863,8 @@ function selecionar(id, voar = false) {
       <table>${o.info().map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join('')}</table>
     </div>
     ${(porElem.size ? porElem : (mapearCrono(), porElem)) && infoCrono(id)}
-    <div class="sec">
+    ${apont.has(id) ? htmlApont(id) : ''}
+    <div class="sec" ${apont.has(id) ? 'hidden' : ''}>
       <h3>Controle da obra</h3>
       <label class="f">Status</label>
       <select id="cStatus">${Object.keys(NOME_STATUS).map(s => `<option value="${s}" ${s === st ? 'selected' : ''}>${NOME_STATUS[s]}</option>`).join('')}</select>
@@ -1935,7 +1954,7 @@ renderer.domElement.addEventListener('pointermove', e => {
   const id = pick(e); const o = id && objetos.get(id);
   if (!o) { tip.style.display = 'none'; renderer.domElement.style.cursor = ''; return; }
   const r = cenaEl.getBoundingClientRect();
-  tip.innerHTML = esc(o.nome) + (o.tipo === 'quadra' ? ` · ${fmt(Q[o.qi].teus)} TEUs` : '') + (controle[id]?.status ? ` · ${NOME_STATUS[controle[id].status]}` : '');
+  tip.innerHTML = esc(o.nome) + (o.tipo === 'quadra' ? ` · ${fmt(Q[o.qi].teus)} TEUs` : '') + (statusDe(id) !== 'nao' ? ` · ${NOME_STATUS[statusDe(id)]}` : '');
   tip.style.left = (e.clientX - r.left + 14) + 'px'; tip.style.top = (e.clientY - r.top + 12) + 'px'; tip.style.display = 'block';
   renderer.domElement.style.cursor = 'pointer';
 });
@@ -2158,6 +2177,120 @@ function aplicarTranspEntorno() {
   if (entorno.mat) { entorno.mat.opacity = 1 - t / 100; entorno.mat.transparent = t > 0; entorno.mat.depthWrite = t === 0; entorno.lin.opacity = Math.min(1, (1 - t / 100) * 1.5); entorno.mat.needsUpdate = true; }
 }
 $('#entornoTransp').addEventListener('input', aplicarTranspEntorno); aplicarTranspEntorno();
+
+// ---------- avanço de campo: Controle de Execução em Campo (apontadores), somente leitura ----------
+// Base: Firestore obras/wsf3/controle-de-atividades_conteudo/campo-compartilhado (mesmo projeto Firebase). Precisa do login do
+// Portal KZ: a sessão é a mesma do controle dos apontadores (mesmo endereço github.io e mesma chave), então quem já entrou lá
+// não digita senha aqui. Cada registro vira, no 3D: início = 1ª data de início de etapa; fim = data da etapa que conclui o elemento.
+const APONT = { sdk: 'https://www.gstatic.com/firebasejs/12.18.0', obra: 'wsf3', controle: 'controle-de-atividades', doc: 'campo-compartilhado', cache: 'tecon-salvador-3d-apontadores' };
+const CONCLUI_APONT = { 'estaca-metalica': 'arrasamento', 'estaca-raiz': 'arrasamento', bloco: 'concretagem2', 'viga-eixo': 'concretagem2', capitel: 'montagem', 'viga-transversal': 'montagem', 'viga-u': 'montagem', laje: 'montagem', cip: 'concretagem', pavimento: 'paver' };
+const ETAPA3D_APONT = {   // etapas dos apontadores -> etapas da estaca no 3D (legenda "última etapa concluída")
+  'estaca-metalica': { cravacao: 'crav', escavacao: 'pino', armadura: 'arm', concretagem: 'conc', arrasamento: 'arras' },
+  'estaca-raiz': { perfuracao: 'crav', camisa: 'arm', concretagem: 'conc', arrasamento: 'arras' },
+};
+const tipoApont = t => /estaca met/i.test(t) ? 'estaca-metalica' : /estaca raiz/i.test(t) ? 'estaca-raiz' : /^bloco/i.test(t) ? 'bloco' : /viga do eixo/i.test(t) ? 'viga-eixo'
+  : /capitel/i.test(t) ? 'capitel' : /viga transversal/i.test(t) ? 'viga-transversal' : /viga longitudinal/i.test(t) ? 'viga-u' : /pr[ée]-?laje|laje pr/i.test(t) ? 'laje'
+  : /concreto moldado/i.test(t) ? 'cip' : /pavimento/i.test(t) ? 'pavimento' : /central/i.test(t) ? 'base-central' : /canteiro/i.test(t) ? 'canteiro' : 'outro';
+const NOME_ETAPA_APONT = { cravacao: 'Cravação da camisa', escavacao: 'Pinagem (escavação do pino)', armadura: 'Armadura', concretagem: 'Concretagem', arrasamento: 'Arrasamento', pit: 'Ensaio de integridade (PIT)',
+  perfuracao: 'Perfuração', camisa: 'Camisa Ø410', magro: 'Concreto magro', armacao1: 'Armadura', concretagem1: 'Concretagem 1ª fase', resistencia1: 'Resistência 1ª fase', concretagem2: 'Concretagem 2ª fase',
+  montagem: 'Montagem', armacao: 'Armadura', bgtc: 'BGTC', areia: 'Berço de areia', paver: 'Paver', locacao: 'Locação', forma: 'Forma', plato: 'Platô', instalacoes: 'Instalações' };
+const normTxt = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+function idDoApont(idA, tipo) {   // código do apontador -> elemento do 3D (null = ainda sem correspondência)
+  const existe = i => objetos.has(i) ? i : null;
+  const perto = (p, filtro, raio) => { let m = null, dm = raio; for (const o of objetos.values()) { if (!filtro(o)) continue; const c = centroObj(o); if (!c) continue; const d = Math.hypot(c.p.x - p.x, c.p.z - p.z); if (d < dm) { dm = d; m = o.id; } } return m; };
+  const pEst = e => { const o = objetos.get('EST ' + e); return o ? centroObj(o)?.p : null; };
+  if (tipo === 'estaca-metalica' || tipo === 'estaca-raiz') return existe('EST ' + idA);
+  if (tipo === 'bloco') return existe(idA.replace(/^Bloco /i, 'BLOCO '));
+  if (tipo === 'viga-eixo') return existe('VIGA -1');
+  if (tipo === 'capitel') { const m = idA.match(/\(([^)]+)\)/), p = m && pEst(m[1]); return p ? perto(p, o => o.tipo === 'capitel' || ['cap', 'capE'].includes(o.grupo), 2.5) : null; }
+  if (tipo === 'viga-transversal') {
+    const m = idA.match(/\(([^)]+)\)/); if (!m) return null; const a = pEst(m[1] + '1'), b = pEst(m[1] + '2'); if (!a || !b) return null;
+    return perto(a.clone().add(b).multiplyScalar(.5), o => o.grupo === 'vtE', 4);
+  }
+  if (tipo === 'viga-u') {
+    const m = idA.match(/\(([A-N])\s+(-?\d+)-(-?\d+)\)/); if (!m) return null;
+    const re = new RegExp(`· ${m[1]} / ${m[2]}–${m[3]}(\\s|$)`);
+    for (const o of objetos.values()) if ((o.tipo === 'viga' || ['vuE', 'viga'].includes(o.grupo)) && re.test(o.nome || '')) return o.id;
+    return null;
+  }
+  if (tipo === 'canteiro') { const n = normTxt(idA.replace(/^Canteiro( \d+)? · /i, '')); for (const o of objetos.values()) if (o.tipo === 'canteiro' && normTxt(o.nome) === n) return o.id; return null; }
+  if (tipo === 'base-central') return existe('CT-16');   // bases da central de concreto: a central inteira fica "em andamento"
+  return null;   // pré-lajes, concreto moldado no local, pavimento: ainda sem correspondência no 3D
+}
+const dApont = s => s ? new Date(s + 'T00:00') : null;
+const apontInfo = { estado: 'lendo' };
+function aplicarApontadores(base, origem) {
+  const d = (base && base.dados) || {}, banco = new Map((d.bancoElementos || []).map(b => [b.id, b])), novo = new Map(), semPar = [];
+  for (const r of d.registros || []) {
+    const b = banco.get(r.id) || {}, tipo = tipoApont(b.tipo || ''), reg = r.reg || {}, ex = b.execucao || {};   // (nomes das etapas: tabela fixa abaixo)
+    const nomeEt = k => NOME_ETAPA_APONT[k] || k.charAt(0).toUpperCase() + k.slice(1);
+    const etapas = Object.entries(reg).filter(([, v]) => v && (v.inicio || v.data)).map(([k, v]) => ({ k, nome: nomeEt(k), ini: dApont(v.inicio || v.data), fim: dApont(v.data) }));
+    if (!etapas.length) continue;
+    const id3 = idDoApont(r.id, tipo); if (!id3) { semPar.push(r.id); continue; }
+    const ini = new Date(Math.min(...etapas.map(e => +e.ini))), ck = CONCLUI_APONT[tipo];
+    let fim = null;
+    if (ck) fim = dApont(reg[ck]?.data); else if (/conclu/i.test(b.status || '')) fim = new Date(Math.max(...etapas.filter(e => e.fim).map(e => +e.fim)));
+    if (tipo === 'base-central') fim = null;
+    const total = Math.max(1, Object.keys(ETAPA3D_APONT[tipo] || {}).length || etapas.length), feitas = etapas.filter(e => e.fim).length;
+    const ult = new Date(Math.max(...etapas.flatMap(e => [+e.ini, +(e.fim || 0)])));
+    const e3 = ETAPA3D_APONT[tipo] ? etapas.filter(e => ETAPA3D_APONT[tipo][e.k]).map(e => ({ ...e, k: ETAPA3D_APONT[tipo][e.k] })) : null;
+    const item = { origem: r.id, tipo: b.tipo || tipo, status: b.status || '', ini, fim, ult, frac: fim ? 1 : Math.min(.95, feitas / total), etapas, etapas3d: e3, obs: r.observacao || '', pend: r.pendencia ? r.descricaoPendencia || 'sim' : '' };
+    const ant = novo.get(id3);
+    if (ant) {   // vários registros num elemento do 3D (ex.: bases da central): junta
+      ant.ini = new Date(Math.min(+ant.ini, +ini)); ant.ult = new Date(Math.max(+ant.ult, +ult)); ant.fim = ant.fim && fim ? new Date(Math.max(+ant.fim, +fim)) : null;
+      ant.origem += ', ' + r.id; ant.etapas = ant.etapas.concat(etapas.map(e => ({ ...e, nome: `${r.id} · ${e.nome}` }))); ant.frac = Math.min(ant.frac, item.frac); ant.status = ant.fim ? ant.status : 'Em execução';
+    } else {
+      if (tipo === 'base-central') { item.etapas = etapas.map(e => ({ ...e, nome: `${r.id} · ${e.nome}` })); item.status = 'Em execução'; }
+      novo.set(id3, item);
+    }
+  }
+  apont = novo;
+  Object.assign(apontInfo, { n: (d.registros || []).length, semPar, salvoEm: origem.salvoEm, lido: origem.lido, cache: origem.cache });
+  mostrarApontInfo(); aplicarCores(); if (selecionado) selecionar(selecionado);
+}
+function mostrarApontInfo(msg) {
+  const el = $('#apontInfo'); if (!el) return;
+  $('#apontLogin').hidden = apontInfo.estado !== 'login';
+  if (msg) { el.innerHTML = msg; return; }
+  const q = apont.size, ok = [...apont.values()].filter(a => a.fim).length;
+  el.innerHTML = `<b>Controle dos apontadores</b>${apontInfo.cache ? ' · <i>última leitura guardada neste navegador</i>' : ''}<br>${q} elementos do 3D com registro (${ok} concluídos) · base salva em ${apontInfo.salvoEm ? new Date(apontInfo.salvoEm).toLocaleString('pt-BR') : '—'}`
+    + (apontInfo.semPar && apontInfo.semPar.length ? `<br><span title="${esc(apontInfo.semPar.join(' · '))}" style="text-decoration:underline dotted">${apontInfo.semPar.length} registro(s) ainda sem correspondência no 3D</span>` : '')
+    + `<br>Esses elementos ficam somente leitura aqui; o resto segue o controle manual.`;
+}
+async function carregarApontadores() {
+  apontInfo.estado = 'lendo'; mostrarApontInfo('Controle dos apontadores: lendo…');
+  try {
+    const [A, F, AU] = await Promise.all([import(`${APONT.sdk}/firebase-app.js`), import(`${APONT.sdk}/firebase-firestore.js`), import(`${APONT.sdk}/firebase-auth.js`)]);
+    const app = A.getApps().find(x => x.name === '[DEFAULT]') || A.initializeApp(FIREBASE);   // app padrão: mesma sessão do Portal KZ
+    const auth = AU.getAuth(app); await auth.authStateReady();
+    if (!auth.currentUser) throw Object.assign(new Error('sem login'), { code: 'sem-login' });
+    const c = await F.getDoc(F.doc(F.getFirestore(app), 'obras', APONT.obra, `${APONT.controle}_conteudo`, APONT.doc));
+    if (!c.exists()) throw new Error('base dos apontadores não encontrada');
+    const base = JSON.parse(c.data().conteudo), salvoEm = c.data().salvoEm || null, lido = new Date().toISOString();
+    try { localStorage.setItem(APONT.cache, JSON.stringify({ salvoEm, lido, base })); } catch (e) { }
+    apontInfo.estado = 'ok'; aplicarApontadores(base, { salvoEm, lido, cache: false });
+    toast(`Avanço de campo atualizado: ${apont.size} elementos`);
+  } catch (e) {
+    const semLogin = e.code === 'sem-login' || /permission/i.test(String(e.code || e.message || ''));
+    apontInfo.estado = semLogin ? 'login' : 'erro';
+    let cache = null; try { cache = JSON.parse(localStorage.getItem(APONT.cache) || 'null'); } catch (x) { }
+    if (cache && cache.base) aplicarApontadores(cache.base, { salvoEm: cache.salvoEm, lido: cache.lido, cache: true });
+    const aviso = semLogin ? 'Sem login do Portal KZ neste navegador: entre pelo botão abaixo e depois clique em <b>Atualizar do campo</b>.' : `Não foi possível ler o controle dos apontadores (${esc(e.message)}).`;
+    if (cache && cache.base) { $('#apontLogin').hidden = !semLogin; $('#apontInfo').insertAdjacentHTML('afterbegin', `<span style="color:#b45309">${aviso}</span><br>`); }
+    else mostrarApontInfo(`<span style="color:#b45309">${aviso}</span><br>Sem o controle dos apontadores, o avanço real usa só o registro manual e as datas reais do P6.`);
+  }
+}
+function htmlApont(id) {   // painel do elemento: etapas registradas pelos apontadores
+  const a = apont.get(id), f = d => d ? fmtD(d) : '—';
+  return `<div class="sec"><h3>Avanço de campo (apontadores)</h3>
+    <p class="nota" style="margin:0 0 6px">${esc(a.origem)} · ${esc(a.tipo)} · <b>${esc(a.status || NOME_STATUS[statusDe(id)])}</b> ${T.ext}</p>
+    <table><tr><td><b>Etapa</b></td><td><b>Início → fim</b></td></tr>${a.etapas.map(e => `<tr><td>${esc(e.nome)}</td><td>${f(e.ini)} → ${e.fim ? f(e.fim) : '<i>em andamento</i>'}</td></tr>`).join('')}</table>
+    ${a.pend ? `<p class="nota" style="color:#b91c1c">Pendência: ${esc(a.pend)}</p>` : ''}${a.obs ? `<p class="nota">Obs.: ${esc(a.obs)}</p>` : ''}
+    <p class="nota">Somente leitura: o registro é feito no <a href="https://kzplanejamentoecustos-boop.github.io/controle-de-atividades/?obra=wsf3" target="_blank" rel="noopener">controle dos apontadores</a>.</p></div>`;
+}
+$('#apontAtualizar').onclick = () => carregarApontadores();
+carregarApontadores();
+window.TECON3D_APONT = { mapa: () => [...apont].map(([k, v]) => [k, v.origem, stApont(v, new Date())]), semPar: () => apontInfo.semPar, idDoApont, aplicarApontadores };
 
 // ---------- loop ----------
 let tamFixo = null;   // [larg, alt] durante a gravação de vídeo: renderiza em resolução fixa, independente da janela
@@ -2510,6 +2643,7 @@ function montarProgramacao(S, n) {
   const E = new Date(+S + n * 7 * DIA), SEM = 7 * DIA;
   // registros de campo valem a partir da data deles (igual ao modo Cronograma): só conta o que foi registrado até o fim da janela
   let ultCampo = 0; for (const c of Object.values(controle)) if (c && c.status && c.status !== 'nao') { const d = dataCampo(c); if (d && d < E && +d > ultCampo) ultCampo = +d; }
+  for (const a of apont.values()) for (const d of [a.ini, a.fim]) if (d && d < E && +d > ultCampo) ultCampo = +d;
   const temCampo = ultCampo > 0, stData = id => campo(id, new Date(+E - 1));
   const per = n === 1 ? DIAS_SEM.map((r, i) => ({ r, a: new Date(+S + i * DIA), b: new Date(+S + (i + 1) * DIA) }))
     : Array.from({ length: n }, (_, i) => ({ r: `S${i + 1}`, a: new Date(+S + i * SEM), b: new Date(+S + (i + 1) * SEM) }));
