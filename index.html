@@ -624,15 +624,11 @@ const COTAS_B = {
   '04': { '1219': () => ({ arr: 1.70, peC: -19.90, pe: -29 }), '1016': () => ({ arr: 1.70, peC: -19.90, pe: -32 }), raiz: () => ({ arr: 0.90, peC: -15, pe: -27 }) },
 };
 const EXEC04 = X.estacas.some(e => e.seg === '04');   // executivo preliminar do Seg. 04 (DWG-00198/00202/00203 R00): linhas I–K, eixos 0–11
-const noExec04 = (seg, x, y) => EXEC04 && seg === '04' && x <= -129.65 && y >= 36.2 && y <= 54.6;
-const caixa2 = pts => [Math.min(...pts.map(q => q[0])), Math.max(...pts.map(q => q[0])), Math.min(...pts.map(q => q[1])), Math.max(...pts.map(q => q[1]))];
-const CX04 = (X.premoldados04 || []).map(q => [q.tipo, caixa2(q.pts)]);
-const sobrepoe04 = (tipo, pts) => { const a = caixa2(pts); return CX04.some(([t, b]) => t === tipo && Math.min(a[1], b[1]) - Math.max(a[0], b[0]) > 0.05 && Math.min(a[3], b[3]) - Math.max(a[2], b[2]) > 0.05); };   // peça do básico que invade uma executiva do mesmo tipo
-const EST04 = X.estacas.filter(e => e.seg === '04');
+const noExec04 = seg => EXEC04 && seg === '04';   // o executivo (30 estacas Ø1219 + 18 raízes, legenda do DWG-00198) substitui TODO o básico do Seg. 04
 const ORIGEM_COTAS = { '02': 'executivo do 01B, estacas 15–23 (DWG-00050), por linha', '03': 'executivo do 01B, estacas 15–23 (DWG-00050), por linha', '04': 'executivo do 01A (DWG-00012/13/14), mesmo tipo de estaca' };
 B.estacas.forEach(e => {
   const [x, y] = e.c, tipo = e.tipo;
-  if (noExec04(e.seg, x, y) || (e.seg === '04' && EST04.some(q => Math.hypot(q.c[0] - x, q.c[1] - y) < 2))) return;   // substituída pelo executivo preliminar
+  if (noExec04(e.seg)) return;   // substituída pelo executivo preliminar
   const linha = /^\d+-[A-N]$/.test(e.eixo) ? e.eixo.split('-')[1] : linhaDe(e.eixo);
   const k = COTAS_B[e.seg][tipo](linha);
   const dPino = tipo === 'raiz' ? 0.35 : tipo === '1219' ? 1.10 : 0.90;
@@ -644,7 +640,7 @@ B.estacas.forEach(e => {
     ['Origem', `<b>Projeto básico</b> — Segmento ${e.seg} ${T.ext}`],
     ['Tipo', `${tipo === 'raiz' ? 'Estaca raiz Ø410 mm' : 'Estaca de concreto com camisa metálica perdida Ø' + tipo + ' mm'} ${T.ext}`],
     ['Posição', `${esc(e.eixo)} ${T.ext}`],
-    ['Cotas no modelo', `arrasamento ${fmtEL(k.arr)} · pé da camisa ${fmtEL(k.peC)} · pé ${fmtEL(k.pe)} ${T.int}<br><span class="nota">adotadas do ${ORIGEM_COTAS[e.seg]}; ${EXEC04 && e.seg === '04' ? 'fora da área do executivo preliminar do Seg. 04 (DWG-00198 R00 cobre só as linhas I–K, eixos 0–11)' : 'o estaqueamento executivo deste segmento ainda não está na pasta'}</span>`],
+    ['Cotas no modelo', `arrasamento ${fmtEL(k.arr)} · pé da camisa ${fmtEL(k.peC)} · pé ${fmtEL(k.pe)} ${T.int}<br><span class="nota">adotadas do ${ORIGEM_COTAS[e.seg]}; o estaqueamento executivo deste segmento ainda não está na pasta</span>`],
     ['Comprimento no modelo', `${fmt(k.arr - k.pe, 2)} m ${T.int}`],
     ['Coordenada (layout)', `${local(x, y)} ${T.ext}`],
     ['Documento', `${esc(e.doc)} (projeto básico)`],
@@ -659,8 +655,7 @@ const PB_INFO = {
 };
 B.pecas.forEach(p => {
   if (p.seg === '01' && p.tipo === 'prelaje' && (X.premoldados01B || []).some(q => q.tipo === 'prelaje')) return;   // pré-lajes do básico no 01B: substituídas pelo DWG-00019
-  if (EXEC04 && p.seg === '04' && p.tipo !== 'bloco' && sobrepoe04(p.tipo, p.pts)) return;
-  if (p.tipo !== 'bloco' && noExec04(p.seg, p.pts.reduce((a, q) => a + q[0], 0) / p.pts.length, p.pts.reduce((a, q) => a + q[1], 0) / p.pts.length)) return;   // Seg. 04: executivo preliminar (blocos B7–B9 sem forma nas folhas: fica o bloco do básico)
+  if (noExec04(p.seg) && !BLOCO_EXEC04[p.id]) return;   // Seg. 04: executivo preliminar; dos blocos de encontro ficam só os das linhas I–K (= B7–B9, sem forma nas folhas)
   const I = PB_INFO[p.tipo], [b, t] = I.niveis;
   const m = extrusao(p.pts, yEL(t), t - b, matF(I.cor)); camada(I.camada).add(m);
   registrar({ id: p.id, tipo: 'pm', grupo: I.grupo, linha: linhaDe(p.eixo), nome: `${I.nome} · ${p.eixo} (básico)`, meshes: [m], info: () => [
@@ -1448,7 +1443,8 @@ function mapearCrono() {
     }
   }
   const add = (id, passo) => { if (!objetos.has(id)) return false; if (!porElem.has(id)) porElem.set(id, []); porElem.get(id).push(passo); return true; };
-  const daExpansao = o => /-04-|S04/.test(o.id);
+  const EST_S04 = new Set(X.estacas.filter(e => e.seg === '04').map(e => 'EST ' + e.codigo));
+  const daExpansao = o => /-04-|S04/.test(o.id) || EST_S04.has(o.id);
   const colSup = [];
   for (const o of objetos.values()) if (Object.values(SUP).some(l => l.includes(o.grupo))) { const b = caixaDe(o); colSup.push([o, colunaDe((b.min.x + b.max.x) / 2)]); }
   // expansão (Seg. 04): estacas raiz do básico agrupadas pelo bloco de encontro mais próximo (Bloco 0k ↔ BE-S04-00k)
@@ -1494,7 +1490,7 @@ function mapearCrono() {
   const comP = [...objetos.values()].filter(o => ESTR.has(o.tipo) && porElem.has(o.id)).map(o => [o, centro(o)]);
   for (const o of objetos.values()) if (ESTR.has(o.tipo) && !porElem.has(o.id)) {
     const c = centro(o); let best = null, bd = Infinity;
-    for (const [q, cq] of comP) { if (q.tipo !== o.tipo || ehRaiz(q) !== ehRaiz(o) || (o.tipo === 'pm' && q.grupo !== o.grupo)) continue; const d = (cq.x - c.x) ** 2 + (cq.z - c.z) ** 2; if (d < bd) { bd = d; best = q; } }
+    for (const [q, cq] of comP) { if (q.tipo !== o.tipo || ehRaiz(q) !== ehRaiz(o) || (o.tipo === 'pm' && q.grupo !== o.grupo) || daExpansao(q) !== daExpansao(o)) continue; const d = (cq.x - c.x) ** 2 + (cq.z - c.z) ** 2; if (d < bd) { bd = d; best = q; } }
     if (best) porElem.set(o.id, porElem.get(best.id).map(s => ({ ...s, herd: best.id })));
   }
   // prédio sobre a laje: só aparece quando as peças e a capa sob ele estiverem prontas (o P6 pode começar a fundação antes)
