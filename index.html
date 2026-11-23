@@ -289,6 +289,8 @@ const D = JSON.parse(document.getElementById('dados').textContent);
 const [OX, OY] = D.origem;
 const F = JSON.parse(document.getElementById('fund').textContent);
 const X = JSON.parse(document.getElementById('exec').textContent);   // projeto executivo (etapa 1)
+// estacas raiz do Seg. 04 (B7–B9, DWG-00198 R00 preliminar): fora do 3D por decisão do usuário (23/11/2026) — no modelo só as 40 raízes do 01A
+X.estacas = X.estacas.filter(e => !(e.seg === '04' && e.tipo === 'raiz'));
 const B = JSON.parse(document.getElementById('basico').textContent); // projeto básico, Segmentos 02–04
 const NV = F.niveis, EL0 = NV.pavimento;           // cena: y = EL − 4,05 (topo do pavimento = 0)
 const yEL = el => el - EL0;
